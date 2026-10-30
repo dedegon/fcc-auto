@@ -1,4 +1,4 @@
-"""claude-auto: запускает FCC, проверяет модели и открывает Claude Code с проверенными."""
+"""claude-auto: определяет подключённых провайдеров по FCC, проверяет модели и открывает Claude Code."""
 
 import argparse
 import json
@@ -12,13 +12,14 @@ from pathlib import Path
 
 import scanner_config as cfg
 from claude_filter import alias_for, start_filter
-from scanner import CACHE_DIR, ModelScanner
+from scanner import CACHE_DIR, ModelScanner, fcc_provider_status, provider_keys
 
 HELP = {
     "ru": {
         "usage": "Использование: claude-auto [опции] [-- аргументы для Claude Code]",
-        "desc": ("Запускает FCC, проверяет бесплатные модели параллельно и открывает Claude Code.\n"
-                 "В /model попадают только проверенные модели. Полный список FCC: fcc-claude."),
+        "desc": ("Запускает FCC, проверяет бесплатные модели подключённых провайдеров параллельно "
+                 "и открывает Claude Code.\nВ /model попадают только проверенные модели. "
+                 "Полный список FCC: fcc-claude."),
         "opts_title": "Опции:",
         "opts": [
             ("--ping MS, --timeout MS", "таймаут ответа одной модели в мс (по умолчанию 15000)"),
@@ -45,8 +46,9 @@ HELP = {
     },
     "en": {
         "usage": "Usage: claude-auto [options] [-- arguments for Claude Code]",
-        "desc": ("Starts FCC, checks free models in parallel and opens Claude Code.\n"
-                 "Only verified models appear in /model. Full FCC list: fcc-claude."),
+        "desc": ("Starts FCC, checks free models of connected providers in parallel "
+                 "and opens Claude Code.\nOnly verified models appear in /model. "
+                 "Full FCC list: fcc-claude."),
         "opts_title": "Options:",
         "opts": [
             ("--ping MS, --timeout MS", "response timeout per model in ms (default 15000)"),
@@ -73,9 +75,16 @@ HELP = {
     },
 }
 
+# Провайдеры, о которых сообщаем пользователю: (id FCC, название, переменная ключа, где взять ключ).
+PROVIDER_LINKS = [
+    ("open_router", "OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
+    ("groq", "Groq", "GROQ_API_KEY", "https://console.groq.com/keys"),
+    ("nvidia_nim", "NVIDIA NIM", "NVIDIA_NIM_API_KEY", "https://build.nvidia.com/settings/api-keys"),
+]
+
 
 def detect_lang() -> str:
-    """ru, если язык интерфейса Windows русский, иначе en. CLAUDE_AUTO_LANG важнее всего."""
+    """ru, если язык интерфейса Windows русский. CLAUDE_AUTO_LANG важнее всего."""
     forced = os.environ.get("CLAUDE_AUTO_LANG", "").strip().lower()
     if forced in ("ru", "en"):
         return forced
@@ -106,6 +115,48 @@ def print_help(lang: str) -> None:
     print(t["note"])
 
 
+def print_report(lang: str, counts: dict[str, int], failed: list[str], keys: dict[str, str]) -> None:
+    """Отчёт о подключении: что готово, что нужно настроить и где взять ключ."""
+    ru = lang == "ru"
+    print("Провайдеры по данным FCC:" if ru else "Providers according to FCC:")
+    known = {pid for pid, *_ in PROVIDER_LINKS}
+    for pid, label, env_name, url in PROVIDER_LINKS:
+        if pid in keys:
+            line = f"{counts[pid]} моделей, сканируем" if ru else f"{counts[pid]} models, scanning"
+            print(f"  [OK]   {label:<12} {line}")
+        elif pid in counts:
+            line = (f"подключён в FCC, но ключ {env_name} не найден для проверки"
+                    if ru else f"connected in FCC, but key {env_name} not found for checks")
+            print(f"  [KEY]  {label:<12} {line}")
+        elif pid in failed:
+            line = "FCC не смог получить модели, проверьте ключ" if ru else "FCC could not list models, check the key"
+            print(f"  [ERR]  {label:<12} {line}")
+        else:
+            line = (f"не подключён: {url}" if ru else f"not connected: {url}")
+            print(f"  [--]   {label:<12} {line}")
+    others = sorted(p for p in counts if p not in known)
+    if others:
+        msg = ("подключены в FCC, но сканер их пока не проверяет: " if ru
+               else "connected in FCC, but the scanner does not check them yet: ")
+        print(f"  {msg}{', '.join(others)}")
+
+
+def print_setup(lang: str) -> None:
+    """Ни один провайдер не готов: инструкция и выход, без ожидания ввода."""
+    if lang == "ru":
+        print()
+        print("Нет ни одного готового провайдера, сканировать нечего.")
+        print(f"  1. Откройте Admin UI: http://127.0.0.1:{cfg.PORT}/admin")
+        print("  2. Providers -> выберите провайдера -> Configure -> вставьте ключ -> Save -> Apply")
+        print("  3. Запустите claude-auto снова.")
+    else:
+        print()
+        print("No provider is ready, nothing to scan.")
+        print(f"  1. Open the Admin UI: http://127.0.0.1:{cfg.PORT}/admin")
+        print("  2. Providers -> pick a provider -> Configure -> paste the key -> Save -> Apply")
+        print("  3. Run claude-auto again.")
+
+
 def port_open() -> bool:
     try:
         with socket.create_connection(("127.0.0.1", cfg.PORT), timeout=1):
@@ -115,7 +166,7 @@ def port_open() -> bool:
 
 
 def ensure_server() -> bool:
-    """Запускает fcc-server, если порт ещё не слушается, и ждёт готовности."""
+    """Запускает fcc-server, если порт не слушается, и ждёт готовности."""
     if port_open():
         return True
     exe = shutil.which("fcc-server")
@@ -135,7 +186,7 @@ def ensure_server() -> bool:
 
 
 def write_settings(models: list[str]) -> str:
-    """Список для /model: проверенные модели и стандартные псевдонимы. Файл не трогает обычный Claude."""
+    """Список для /model: проверенные модели и стандартные псевдонимы. Обычный Claude не затрагивается."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / "claude-settings.json"
     data = {"availableModels": models + ["opus", "sonnet", "haiku"]}
@@ -156,8 +207,9 @@ def saved_user_model() -> str | None:
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    lang = detect_lang()
     if "-h" in sys.argv or "--help" in sys.argv:
-        print_help(detect_lang())
+        print_help(lang)
         return
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -185,19 +237,28 @@ def main() -> None:
         print("fcc-server не поднялся на порту", cfg.PORT)
         sys.exit(1)
 
-    if args.offline:
-        print("Режим --offline: сканирование пропущено, берём проверенные из кэша.")
-    else:
+    keys: dict[str, str] = {}
+    if not args.offline:
+        try:
+            counts, failed = fcc_provider_status()
+        except Exception as err:
+            print(f"Не удалось получить данные от FCC: {type(err).__name__}")
+            sys.exit(1)
+        keys = provider_keys(counts)
+        print_report(lang, counts, failed, keys)
+        if not keys:
+            print_setup(lang)
+            sys.exit(2)
+        print()
         scanner.scan(force=True, timeout_s=args.timeout_ms / 1000,
-                     max_wait_s=args.max_wait, workers=args.workers)
+                     max_wait_s=args.max_wait, workers=args.workers, providers=keys)
+    else:
+        print("Режим --offline: сканирование пропущено, берём проверенные из кэша.")
+
     models = scanner.usable(skip=set(args.skip))
     if not models:
         print("Нет проверенных моделей с поддержкой инструментов.")
         sys.exit(1)
-
-    picks = models[:3]
-    while len(picks) < 3:
-        picks.append(picks[0])
 
     srv = start_filter(f"http://127.0.0.1:{cfg.PORT}", lambda: set(ModelScanner().usable()))
     claude_bin = shutil.which("claude")
@@ -212,7 +273,6 @@ def main() -> None:
     env.update({
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{srv.server_address[1]}",
         "ANTHROPIC_AUTH_TOKEN": "fcc",
-        
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
         "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
         "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
@@ -224,13 +284,15 @@ def main() -> None:
         "DISABLE_FEEDBACK_COMMAND": "1",
         "DISABLE_ERROR_REPORTING": "1",
     })
+    # Если пользователь уже выбрал модель через /model, она важнее модели по умолчанию.
+    model_args = [] if saved_user_model() else ["--model", alias_for(models[0])]
 
-    print(f"\nПроверенных моделей: {len(models)}. По умолчанию: {picks[0]}")
+    print(f"\nПроверенных моделей: {len(models)}")
     print("Полный список FCC: fcc-claude")
-    os.system("cls")  # очищаем экран: остаётся только Claude Code
+    os.system("cls")
     try:
-        model_args = [] if saved_user_model() else ["--model", alias_for(picks[0])]
-        rc = subprocess.call([claude_bin, "--settings", settings_path, *model_args, *claude_args], env=env)
+        rc = subprocess.call([claude_bin, "--settings", settings_path, *model_args, *claude_args],
+                             env=env)
     finally:
         srv.shutdown()
     sys.exit(rc)

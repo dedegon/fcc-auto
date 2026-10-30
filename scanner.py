@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -65,6 +66,31 @@ def get_key(name: str, env: dict[str, str]) -> str | None:
     return os.environ.get(name) or env.get(name) or None
 
 
+def fcc_provider_status() -> tuple[dict[str, int], list[str]]:
+    """Что FCC видит прямо сейчас: сколько моделей у каждого провайдера и у каких ошибка.
+    Источник - Admin API самого FCC, поэтому подключения через Admin UI учитываются без .env."""
+    url = f"http://127.0.0.1:{cfg.PORT}/admin/api/models"
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    counts: dict[str, int] = {}
+    for ref in data.get("models", []):
+        provider = str(ref).split("/", 1)[0]
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts, list(data.get("failed_providers", []))
+
+
+def provider_keys(counts: dict[str, int]) -> dict[str, str]:
+    """Провайдеры, которые сканер проверит: FCC видит их модели и есть ключ для прямого запроса."""
+    env = read_env()
+    found: dict[str, str] = {}
+    for name, p in cfg.PROVIDERS.items():
+        if counts.get(name):
+            key = get_key(p["key_env"], env)
+            if key:
+                found[name] = key
+    return found
+
+
 def _headers(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}", "User-Agent": "claude-auto/2.0"}
 
@@ -76,7 +102,7 @@ def _is_free(model: dict) -> bool:
 
 
 def _classify(code: int, text: str) -> tuple[str, str]:
-    """Превращает HTTP-ошибку в статус и понятное пояснение."""
+    """Превращает HTTP-ошибку в статус и пояснение."""
     if "free-models-per-day" in text:
         return "quota", "дневной лимит"
     if code == 413:
@@ -111,7 +137,7 @@ class ModelCache:
 
 
 class ModelScanner:
-    """Асинхронно проверяет модели подключённых провайдеров FCC."""
+    """Асинхронно проверяет модели подключённых провайдеров."""
 
     def __init__(self, cache: ModelCache | None = None):
         self.cache = cache or ModelCache()
@@ -130,18 +156,22 @@ class ModelScanner:
         items.sort(key=lambda x: x[1]["latency"])
         return [fid for fid, _ in items]
 
-    def scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int) -> None:
-        asyncio.run(self._scan(force, timeout_s, max_wait_s, workers))
+    def scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int,
+             providers: dict[str, str]) -> None:
+        asyncio.run(self._scan(force, timeout_s, max_wait_s, workers, providers))
 
-    async def _collect(self, session: aiohttp.ClientSession, force: bool) -> list[tuple]:
-        """Модели, которые нужно проверить сейчас (по всем подключённым провайдерам)."""
-        env = read_env()
+    def _fresh(self, entry: dict) -> bool:
+        age = now() - datetime.fromisoformat(entry["checked"])
+        ttl = timedelta(hours=cfg.OK_TTL_HOURS) if entry["status"] == "ok" \
+            else timedelta(minutes=cfg.FAIL_TTL_MINUTES)
+        return age < ttl
+
+    async def _collect(self, session: aiohttp.ClientSession, force: bool,
+                       providers: dict[str, str]) -> list[tuple]:
+        """Модели, которые нужно проверить сейчас. Список берётся живым, с каждого провайдера."""
         tasks = []
-        for name, p in cfg.PROVIDERS.items():
-            key = get_key(p["key_env"], env)
-            if not key:
-                print(f"[{name}] нет ключа, пропускаю")
-                continue
+        for name, key in providers.items():
+            p = cfg.PROVIDERS[name]
             try:
                 async with session.get(p["models_url"], headers=_headers(key),
                                        timeout=aiohttp.ClientTimeout(total=15)) as r:
@@ -162,12 +192,6 @@ class ModelScanner:
                     continue
                 tasks.append((name, p, key, mid, fid))
         return tasks
-
-    def _fresh(self, entry: dict) -> bool:
-        age = now() - datetime.fromisoformat(entry["checked"])
-        ttl = timedelta(hours=cfg.OK_TTL_HOURS) if entry["status"] == "ok" \
-            else timedelta(minutes=cfg.FAIL_TTL_MINUTES)
-        return age < ttl
 
     async def _test(self, session: aiohttp.ClientSession, p: dict, key: str,
                     model_id: str, timeout_s: float) -> dict:
@@ -205,16 +229,17 @@ class ModelScanner:
         res["latency"] = round(time.monotonic() - started, 2)
         return res
 
-    async def _scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int) -> None:
+    async def _scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int,
+                    providers: dict[str, str]) -> None:
         connector = aiohttp.TCPConnector(limit=workers)
         async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = await self._collect(session, force)
+            tasks = await self._collect(session, force, providers)
             if not tasks:
                 print("Все модели уже проверены недавно.")
                 return
             print(f"Проверяю моделей: {len(tasks)} (ответ {timeout_s:.1f}с, общий предел {max_wait_s:.0f}с)")
 
-            sems = {name: asyncio.Semaphore(p["parallel"]) for name, p in cfg.PROVIDERS.items()}
+            sems = {name: asyncio.Semaphore(cfg.PROVIDERS[name]["parallel"]) for name in providers}
             stopped: set[str] = set()
 
             async def work(task):
