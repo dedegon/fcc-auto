@@ -8,4 +8,5 @@ build/
 scan_results.json
 cache.json
 claude-settings.json
-.envuv.lock
+.env
+uv.lock
