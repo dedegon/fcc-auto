@@ -1,17 +1,17 @@
-<#
+﻿<#
 .SYNOPSIS
   Установка claude-auto и FCC (Free Claude Code) на Windows.
-  Запускать из папки репозитория: .\install.ps1
+  Запуск из папки репозитория: .\install.ps1
   Удалить только claude-auto: .\install.ps1 -Uninstall
 #>
 param([switch]$Uninstall)
 $ErrorActionPreference = "Stop"
 
 $LocalBin = Join-Path $env:USERPROFILE ".local\bin"
-function Step([string]$t) { Write-Host "`n==> $t" -ForegroundColor Cyan }
-function Ok([string]$t)   { Write-Host "    OK: $t" -ForegroundColor Green }
-function Warn([string]$t) { Write-Host "    ВНИМАНИЕ: $t" -ForegroundColor Yellow }
-function Refresh-Path     { $env:Path = "$LocalBin;$env:Path" }
+function Step([string]$t)  { Write-Host "`n==> $t" -ForegroundColor Cyan }
+function Ok([string]$t)    { Write-Host "    OK: $t" -ForegroundColor Green }
+function Warn([string]$t)  { Write-Host "    ВНИМАНИЕ: $t" -ForegroundColor Yellow }
+function Refresh-Path      { $env:Path = "$LocalBin;$env:Path" }
 function Has([string]$cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 if (-not $MyInvocation.MyCommand.Path) {
@@ -40,7 +40,7 @@ try {
 
     Step "2/4 FCC (Free Claude Code)"
     if (-not (Has "fcc-server")) {
-        Warn "FCC не найден, запускаю официальный установщик FCC. Он спросит про агенты: для Claude Code ответьте Y, остальные N."
+        Warn "FCC не найден, запускаю официальный установщик FCC. Для Claude Code ответьте Y, остальные агенты N."
         & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1")))
         Refresh-Path
     }
