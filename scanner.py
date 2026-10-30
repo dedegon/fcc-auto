@@ -1,4 +1,4 @@
-"""Сканер моделей: асинхронные проверки текста, вызова инструментов и лимита токенов."""
+"""Сканер моделей: текст, вызов инструментов и лимит токенов провайдеров FCC."""
 
 import asyncio
 import json
@@ -67,8 +67,7 @@ def get_key(name: str, env: dict[str, str]) -> str | None:
 
 
 def fcc_provider_status() -> tuple[dict[str, int], list[str]]:
-    """Что FCC видит прямо сейчас: сколько моделей у каждого провайдера и у каких ошибка.
-    Источник - Admin API самого FCC, поэтому подключения через Admin UI учитываются без .env."""
+    """Что FCC видит сейчас: число моделей по провайдерам и провайдеры с ошибкой."""
     url = f"http://127.0.0.1:{cfg.PORT}/admin/api/models"
     with urllib.request.urlopen(url, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -92,7 +91,7 @@ def provider_keys(counts: dict[str, int]) -> dict[str, str]:
 
 
 def _headers(key: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {key}", "User-Agent": "claude-auto/2.0"}
+    return {"Authorization": f"Bearer {key}", "User-Agent": "claude-auto/3.0"}
 
 
 def _is_free(model: dict) -> bool:
@@ -101,13 +100,18 @@ def _is_free(model: dict) -> bool:
         pricing.get("prompt") == "0" and pricing.get("completion") == "0")
 
 
+def _limit_from(text: str) -> int | None:
+    """Лимит токенов в минуту из ответа провайдера (HTTP 413)."""
+    m = re.search(r"Limit (\d+)", text)
+    return int(m.group(1)) if m else None
+
+
 def _classify(code: int, text: str) -> tuple[str, str]:
-    """Превращает HTTP-ошибку в статус и пояснение."""
+    """HTTP-ошибка -> статус и пояснение."""
     if "free-models-per-day" in text:
         return "quota", "дневной лимит"
     if code == 413:
-        m = re.search(r"Limit (\d+)", text)
-        return "too_big", f"лимит {m.group(1) if m else '?'} токенов/мин"
+        return "too_big", f"лимит {_limit_from(text) or '?'} токенов/мин"
     if code in (429, 502, 503):
         return "busy", f"HTTP {code}"
     return "fail", f"HTTP {code}: {text[:100]}"
@@ -145,7 +149,7 @@ class ModelScanner:
 
     def mark(self, fid: str, status: str, note: str) -> None:
         self.entries[fid] = {"status": status, "tools": False, "note": note,
-                             "latency": 0.0, "checked": now().isoformat()}
+                             "limit_tpm": None, "latency": 0.0, "checked": now().isoformat()}
         self.cache.save(self.entries)
 
     def usable(self, skip: set[str] | None = None) -> list[str]:
@@ -193,12 +197,35 @@ class ModelScanner:
                 tasks.append((name, p, key, mid, fid))
         return tasks
 
+    async def _short_tools(self, session: aiohttp.ClientSession, p: dict, key: str,
+                           model_id: str, timeout_s: float) -> dict:
+        """Короткий запрос с инструментом: проверяет инструменты отдельно от лимита контекста."""
+        body = {
+            "model": model_id,
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Вызови инструмент get_time."}],
+            "tools": [TOOL],
+            "tool_choice": "auto",
+        }
+        try:
+            async with session.post(p["chat_url"], json=body, headers=_headers(key),
+                                    timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+                text = await r.text()
+                if r.status == 200:
+                    message = (json.loads(text).get("choices") or [{}])[0].get("message") or {}
+                    tools = bool(message.get("tool_calls"))
+                    return {"status": "ok", "tools": tools,
+                            "note": "" if tools else "нет вызова инструмента"}
+                return {"status": "fail", "tools": False, "note": f"инструменты: HTTP {r.status}"}
+        except Exception as err:
+            return {"status": "fail", "tools": False, "note": f"инструменты: {type(err).__name__}"}
+
     async def _test(self, session: aiohttp.ClientSession, p: dict, key: str,
                     model_id: str, timeout_s: float) -> dict:
-        """Запрос, похожий на Claude Code: длинный контекст и вызов инструмента."""
+        """Большой запрос, похожий на Claude Code. При лимите токенов инструменты проверяются коротким запросом."""
         started = time.monotonic()
-        res = {"status": "fail", "tools": False, "note": "", "latency": 0.0,
-               "checked": now().isoformat()}
+        res = {"status": "fail", "tools": False, "note": "", "limit_tpm": None,
+               "latency": 0.0, "checked": now().isoformat()}
         body = {
             "model": model_id,
             "max_tokens": 256,
@@ -211,8 +238,7 @@ class ModelScanner:
                                     timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
                 text = await r.text()
                 if r.status == 200:
-                    data = json.loads(text)
-                    message = (data.get("choices") or [{}])[0].get("message") or {}
+                    message = (json.loads(text).get("choices") or [{}])[0].get("message") or {}
                     if message:
                         res["status"] = "ok"
                         res["tools"] = bool(message.get("tool_calls"))
@@ -221,7 +247,10 @@ class ModelScanner:
                     else:
                         res["note"] = "пустой ответ"
                 else:
-                    res["status"], res["note"] = _classify(r.status, text[:500])
+                    res["status"], res["note"] = _classify(r.status, text)
+                    if res["status"] == "too_big":
+                        res["limit_tpm"] = _limit_from(text)
+                        res.update(await self._short_tools(session, p, key, model_id, timeout_s))
         except asyncio.TimeoutError:
             res["status"], res["note"] = "timeout", "нет ответа вовремя"
         except Exception as err:
@@ -265,7 +294,8 @@ class ModelScanner:
                 self.entries[fid] = res
                 mark = "ok" if res["status"] == "ok" and res["tools"] else res["status"]
                 extra = res["note"] if mark != "ok" else f"{res['latency']}s"
-                print(f"  {mark:<8} {fid}  {extra}")
+                limit = f"  лимит {res['limit_tpm']}/мин" if res.get("limit_tpm") else ""
+                print(f"  {mark:<8} {fid}  {extra}{limit}")
             if pending:
                 print(f"Общий предел исчерпан, не успели проверить: {len(pending)}")
             self.cache.save(self.entries)

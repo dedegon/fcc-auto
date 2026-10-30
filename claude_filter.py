@@ -101,11 +101,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if urlsplit(self.path).path == "/v1/models":
-            allowed = sorted(self.verified())
+            labels = self.verified()
+            allowed = sorted(labels)
             items = [{
                 "type": "model",
                 "id": alias_for(ref),
-                "display_name": ref,
+                "display_name": labels.get(ref, ref),
                 "created_at": "2026-01-01T00:00:00Z",
             } for ref in allowed]
             payload = json.dumps({

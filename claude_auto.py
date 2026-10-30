@@ -205,6 +205,15 @@ def saved_user_model() -> str | None:
     return value or None
 
 
+def model_labels(scanner: ModelScanner) -> dict[str, str]:
+    """Проверенные модели с подписью лимита: её видно в панели /model Claude Code."""
+    labels: dict[str, str] = {}
+    for fid in scanner.usable():
+        limit = scanner.entries[fid].get("limit_tpm")
+        labels[fid] = f"{fid}  [лимит {limit} токенов/мин]" if limit else f"{fid}  [без лимита]"
+    return labels
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     lang = detect_lang()
@@ -260,7 +269,7 @@ def main() -> None:
         print("Нет проверенных моделей с поддержкой инструментов.")
         sys.exit(1)
 
-    srv = start_filter(f"http://127.0.0.1:{cfg.PORT}", lambda: set(ModelScanner().usable()))
+    srv = start_filter(f"http://127.0.0.1:{cfg.PORT}", lambda: model_labels(ModelScanner()))
     claude_bin = shutil.which("claude")
     if not claude_bin:
         print("Claude Code не найден в PATH.")
