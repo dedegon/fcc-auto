@@ -1,15 +1,14 @@
-"""Сканер моделей: проверяет текст и вызов инструментов, сохраняет результаты в кэш."""
+"""Сканер моделей: асинхронные проверки текста, вызова инструментов и лимита токенов."""
 
+import asyncio
 import json
 import os
 import re
-import threading
 import time
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import aiohttp
 
 import scanner_config as cfg
 
@@ -66,16 +65,8 @@ def get_key(name: str, env: dict[str, str]) -> str | None:
     return os.environ.get(name) or env.get(name) or None
 
 
-def _api(url: str, key: str, body: dict | None = None, timeout: float = 30) -> dict:
-    headers = {"Authorization": f"Bearer {key}", "User-Agent": "claude-auto/2.0"}
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers,
-                                 method="POST" if body is not None else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def _headers(key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {key}", "User-Agent": "claude-auto/2.0"}
 
 
 def _is_free(model: dict) -> bool:
@@ -84,8 +75,20 @@ def _is_free(model: dict) -> bool:
         pricing.get("prompt") == "0" and pricing.get("completion") == "0")
 
 
+def _classify(code: int, text: str) -> tuple[str, str]:
+    """Превращает HTTP-ошибку в статус и понятное пояснение."""
+    if "free-models-per-day" in text:
+        return "quota", "дневной лимит"
+    if code == 413:
+        m = re.search(r"Limit (\d+)", text)
+        return "too_big", f"лимит {m.group(1) if m else '?'} токенов/мин"
+    if code in (429, 502, 503):
+        return "busy", f"HTTP {code}"
+    return "fail", f"HTTP {code}: {text[:100]}"
+
+
 class ModelCache:
-    """Кэш результатов проверок на диске. Сбрасывается при смене CACHE_VERSION."""
+    """Кэш результатов на диске. Сбрасывается при смене CACHE_VERSION."""
 
     def __init__(self, path: Path = CACHE_FILE):
         self.path = path
@@ -108,14 +111,13 @@ class ModelCache:
 
 
 class ModelScanner:
-    """Параллельно проверяет модели подключённых провайдеров FCC."""
+    """Асинхронно проверяет модели подключённых провайдеров FCC."""
 
     def __init__(self, cache: ModelCache | None = None):
         self.cache = cache or ModelCache()
         self.entries: dict = self.cache.load()
 
     def mark(self, fid: str, status: str, note: str) -> None:
-        """Записывает результат вручную, например для --skip."""
         self.entries[fid] = {"status": status, "tools": False, "note": note,
                              "latency": 0.0, "checked": now().isoformat()}
         self.cache.save(self.entries)
@@ -128,14 +130,11 @@ class ModelScanner:
         items.sort(key=lambda x: x[1]["latency"])
         return [fid for fid, _ in items]
 
-    def _fresh(self, entry: dict) -> bool:
-        age = now() - datetime.fromisoformat(entry["checked"])
-        ttl = timedelta(hours=cfg.OK_TTL_HOURS) if entry["status"] == "ok" \
-            else timedelta(minutes=cfg.FAIL_TTL_MINUTES)
-        return age < ttl
+    def scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int) -> None:
+        asyncio.run(self._scan(force, timeout_s, max_wait_s, workers))
 
-    def _collect(self, force: bool) -> list[tuple]:
-        """Список моделей, которые нужно проверить сейчас."""
+    async def _collect(self, session: aiohttp.ClientSession, force: bool) -> list[tuple]:
+        """Модели, которые нужно проверить сейчас (по всем подключённым провайдерам)."""
         env = read_env()
         tasks = []
         for name, p in cfg.PROVIDERS.items():
@@ -144,7 +143,10 @@ class ModelScanner:
                 print(f"[{name}] нет ключа, пропускаю")
                 continue
             try:
-                models = _api(p["models_url"], key, timeout=15).get("data", [])
+                async with session.get(p["models_url"], headers=_headers(key),
+                                       timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    r.raise_for_status()
+                    models = (await r.json()).get("data", [])
             except Exception as err:
                 print(f"[{name}] список моделей не получен: {type(err).__name__}")
                 continue
@@ -161,8 +163,15 @@ class ModelScanner:
                 tasks.append((name, p, key, mid, fid))
         return tasks
 
-    def _test(self, p: dict, key: str, model_id: str, timeout_s: float) -> dict:
-        """Запрос, похожий на запрос Claude Code: длинный контекст и вызов инструмента."""
+    def _fresh(self, entry: dict) -> bool:
+        age = now() - datetime.fromisoformat(entry["checked"])
+        ttl = timedelta(hours=cfg.OK_TTL_HOURS) if entry["status"] == "ok" \
+            else timedelta(minutes=cfg.FAIL_TTL_MINUTES)
+        return age < ttl
+
+    async def _test(self, session: aiohttp.ClientSession, p: dict, key: str,
+                    model_id: str, timeout_s: float) -> dict:
+        """Запрос, похожий на Claude Code: длинный контекст и вызов инструмента."""
         started = time.monotonic()
         res = {"status": "fail", "tools": False, "note": "", "latency": 0.0,
                "checked": now().isoformat()}
@@ -174,71 +183,64 @@ class ModelScanner:
             "tool_choice": "auto",
         }
         try:
-            data = _api(p["chat_url"], key, body, timeout=timeout_s)
-            message = (data.get("choices") or [{}])[0].get("message") or {}
-            if message:
-                res["status"] = "ok"
-                res["tools"] = bool(message.get("tool_calls"))
-                if not res["tools"]:
-                    res["note"] = "нет вызова инструмента"
-            else:
-                res["note"] = "пустой ответ"
-        except urllib.error.HTTPError as err:
-            text = err.read()[:500].decode("utf-8", "ignore")
-            if "free-models-per-day" in text:
-                res["status"], res["note"] = "quota", "дневной лимит"
-            elif err.code == 413:
-                m = re.search(r"Limit (\d+)", text)
-                res["status"] = "too_big"
-                res["note"] = f"лимит {m.group(1) if m else '?'} токенов/мин"
-            elif err.code in (429, 502, 503):
-                res["status"], res["note"] = "busy", f"HTTP {err.code}"
-            else:
-                res["note"] = f"HTTP {err.code}: {text[:100]}"
-        except TimeoutError:
+            async with session.post(p["chat_url"], json=body, headers=_headers(key),
+                                    timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+                text = await r.text()
+                if r.status == 200:
+                    data = json.loads(text)
+                    message = (data.get("choices") or [{}])[0].get("message") or {}
+                    if message:
+                        res["status"] = "ok"
+                        res["tools"] = bool(message.get("tool_calls"))
+                        if not res["tools"]:
+                            res["note"] = "нет вызова инструмента"
+                    else:
+                        res["note"] = "пустой ответ"
+                else:
+                    res["status"], res["note"] = _classify(r.status, text[:500])
+        except asyncio.TimeoutError:
             res["status"], res["note"] = "timeout", "нет ответа вовремя"
         except Exception as err:
             res["note"] = type(err).__name__
         res["latency"] = round(time.monotonic() - started, 2)
         return res
 
-    def scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int) -> None:
-        tasks = self._collect(force)
-        if not tasks:
-            print("Все модели уже проверены недавно.")
-            return
-        print(f"Проверяю моделей: {len(tasks)} (ответ {timeout_s:.1f}с, общий предел {max_wait_s:.0f}с)")
+    async def _scan(self, force: bool, timeout_s: float, max_wait_s: float, workers: int) -> None:
+        connector = aiohttp.TCPConnector(limit=workers)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = await self._collect(session, force)
+            if not tasks:
+                print("Все модели уже проверены недавно.")
+                return
+            print(f"Проверяю моделей: {len(tasks)} (ответ {timeout_s:.1f}с, общий предел {max_wait_s:.0f}с)")
 
-        sems = {name: threading.Semaphore(p["parallel"]) for name, p in cfg.PROVIDERS.items()}
-        stopped: set[str] = set()
-        lock = threading.Lock()
+            sems = {name: asyncio.Semaphore(p["parallel"]) for name, p in cfg.PROVIDERS.items()}
+            stopped: set[str] = set()
 
-        def work(task):
-            name, p, key, mid, fid = task
-            with sems[name]:
-                with lock:
+            async def work(task):
+                name, p, key, mid, fid = task
+                if name in stopped:
+                    return fid, None
+                async with sems[name]:
                     if name in stopped:
                         return fid, None
-                res = self._test(p, key, mid, timeout_s)
-            if res["status"] == "quota":
-                with lock:
+                    res = await self._test(session, p, key, mid, timeout_s)
+                if res["status"] == "quota":
                     stopped.add(name)
-            return fid, res
+                return fid, res
 
-        pool = ThreadPoolExecutor(max_workers=workers)
-        futures = [pool.submit(work, t) for t in tasks]
-        done, not_done = wait(futures, timeout=max_wait_s)
-        for fut in done:
-            fid, res = fut.result()
-            if res is None:
-                continue
-            self.entries[fid] = res
-            mark = "ok" if res["status"] == "ok" and res["tools"] else res["status"]
-            extra = res["note"] if mark != "ok" else f"{res['latency']}s"
-            print(f"  {mark:<8} {fid}  {extra}")
-        for fut in not_done:
-            fut.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
-        if not_done:
-            print(f"Общий предел исчерпан, не успели проверить: {len(not_done)}")
-        self.cache.save(self.entries)
+            jobs = [asyncio.create_task(work(t)) for t in tasks]
+            done, pending = await asyncio.wait(jobs, timeout=max_wait_s)
+            for job in pending:
+                job.cancel()
+            for job in done:
+                fid, res = job.result()
+                if res is None:
+                    continue
+                self.entries[fid] = res
+                mark = "ok" if res["status"] == "ok" and res["tools"] else res["status"]
+                extra = res["note"] if mark != "ok" else f"{res['latency']}s"
+                print(f"  {mark:<8} {fid}  {extra}")
+            if pending:
+                print(f"Общий предел исчерпан, не успели проверить: {len(pending)}")
+            self.cache.save(self.entries)
