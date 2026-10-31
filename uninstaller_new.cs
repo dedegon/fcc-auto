@@ -16,7 +16,8 @@ class UninstallLauncher
     const string APP_NAME = "claude-auto";
     const string INSTALL_DIR = @"C:\Program Files (x86)\claude-auto";
     // Версия/коммит FCC для uninstall --purge-fcc (обновлять при изменении)
-    const string FCC_REPO_COMMIT = "a54c5b1"; // 1.0.4 commit
+    // https://github.com/Alishahryar1/free-claude-code/commit/4e92110a0a3232765c6fc7a8c9d34489fb0e65da
+    const string FCC_REPO_COMMIT = "4e92110a0a3232765c6fc7a8c9d34489fb0e65da";
 
     // ===================== Restart Manager P/Invoke =====================
 
