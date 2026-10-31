@@ -8,6 +8,10 @@
 param([switch]$Silent, [switch]$Yes)
 $ErrorActionPreference = "Stop"
 
+# УСТАРЕЛО: uninstall.ps1 заменён на uninstaller_new.exe
+Write-Host "uninstall.ps1 устарел. Используйте uninstaller_new.exe" -ForegroundColor Yellow
+exit 1
+
 $APP_NAME = "fcc-auto-claude"
 $INSTALL_DIR = "C:\Program Files (x86)\fcc-auto-claude"
 $Utf8 = New-Object System.Text.UTF8Encoding $false

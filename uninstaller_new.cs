@@ -68,6 +68,12 @@ class UninstallLauncher
 
     static int Main(string[] args)
     {
+        // --- Скрытый флаг --selftest: запуск внутренних тестов логики ---
+        if (args.Any(a => string.Equals(a, "--selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunSelfTest();
+        }
+
         string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         bool silent = args.Any(a =>
             string.Equals(a, "-Silent", StringComparison.OrdinalIgnoreCase) ||
@@ -354,6 +360,55 @@ class UninstallLauncher
     static bool ShouldRemoveFcc(bool purgeFcc, FccPreexistingStatus status)
     {
         return purgeFcc && status == FccPreexistingStatus.False;
+    }
+
+    // Внутренний тест логики ShouldRemoveFcc.
+    // Вызывается при флаге --selftest. Ничего не удаляет, не вызывает uv, не трогает файлы/реестр/PATH.
+    static int RunSelfTest()
+    {
+        Console.WriteLine("=== SELFTEST: ShouldRemoveFcc ===");
+        Console.WriteLine();
+
+        var testCases = new[]
+        {
+            new { Purge = false, Status = FccPreexistingStatus.False, Expected = false, Desc = "без флага и preexisting=false" },
+            new { Purge = true,  Status = FccPreexistingStatus.True,  Expected = false, Desc = "флаг и preexisting=true" },
+            new { Purge = true,  Status = FccPreexistingStatus.False, Expected = true,  Desc = "флаг и preexisting=false" },
+            new { Purge = true,  Status = FccPreexistingStatus.Missing, Expected = false, Desc = "флаг и манифест отсутствует" },
+            new { Purge = true,  Status = FccPreexistingStatus.Error,   Expected = false, Desc = "флаг и ошибка парсинга (поле отсутствует)" },
+        };
+
+        bool allPassed = true;
+        Console.WriteLine("№  | purgeFcc | status     | ожидание | факт   | PASS/FAIL | описание");
+        Console.WriteLine("---|----------|------------|----------|--------|-----------|--------------------------");
+
+        for (int i = 0; i < testCases.Length; i++)
+        {
+            var tc = testCases[i];
+            bool actual = ShouldRemoveFcc(tc.Purge, tc.Status);
+            bool passed = actual == tc.Expected;
+            allPassed = allPassed && passed;
+
+            string purgeStr = tc.Purge ? "true" : "false";
+            string statusStr = tc.Status.ToString();
+            string expectedStr = tc.Expected ? "да" : "нет";
+            string actualStr = actual ? "да" : "нет";
+            string resultStr = passed ? "PASS" : "FAIL";
+
+            Console.WriteLine($"{i+1}  | {purgeStr,-8} | {statusStr,-10} | {expectedStr,-8} | {actualStr,-6} | {resultStr,-9} | {tc.Desc}");
+        }
+
+        Console.WriteLine("---|----------|------------|----------|--------|-----------|--------------------------");
+        if (allPassed)
+        {
+            Console.WriteLine("ВСЕ ТЕСТЫ ПРОШЛИ (PASS)");
+            return 0;
+        }
+        else
+        {
+            Console.WriteLine("ЕСТЬ ПРОВАЛЫ (FAIL)");
+            return 1;
+        }
     }
 
     static bool IsOurInstallDir(string dir)
