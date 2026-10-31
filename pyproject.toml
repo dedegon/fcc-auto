@@ -6,6 +6,7 @@ dependencies = ["aiohttp>=3.9"]
 
 [project.scripts]
 claude-auto = "claude_auto:main"
+claude-auto-test = "claude_auto:test_main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -13,3 +14,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["claude_auto", "claude_filter", "scanner", "scanner_config"]
+packages = ["model_limits"]

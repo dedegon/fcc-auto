@@ -19,6 +19,7 @@ $Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LocalBin = Join-Path $env:USERPROFILE ".local\bin"
 $DataDir  = Join-Path $env:LOCALAPPDATA "claude-auto"
 $Manifest = Join-Path $DataDir "install.json"
+$LogFile  = Join-Path $DataDir "install.log"
 $Utf8     = New-Object System.Text.UTF8Encoding $false
 
 function Step([string]$t)  { Write-Host "`n==> $t" -ForegroundColor Cyan }
@@ -53,6 +54,39 @@ function Uninstall-Tool {
     if (Has "uv") { try { uv tool uninstall claude-auto 2>&1 | Out-Null } catch { } }
 }
 
+# Надёжный запуск внешней команды с захватом и stdout, и stderr.
+function Invoke-Captured([string]$exe, [string[]]$argv) {
+    New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+    Write-Host "    команда: $exe $($argv -join ' ')" -ForegroundColor DarkGray
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = $exe
+    $psi.Arguments              = ($argv | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $p.StandardOutput.ReadToEnd()
+    $stderr = $p.StandardError.ReadToEnd()
+    $p.WaitForExit()
+    $code = $p.ExitCode
+
+    $all = @()
+    if ($stdout.Trim()) { $all += $stdout.TrimEnd().Split("`n") }
+    if ($stderr.Trim()) { $all += $stderr.TrimEnd().Split("`n") }
+
+    foreach ($line in $all) { Write-Host "    $line" }
+
+    try {
+        Add-Content -LiteralPath $LogFile -Value ("`n=== $exe $($argv -join ' ') (exit $code) ===") -Encoding UTF8
+        Add-Content -LiteralPath $LogFile -Value ($all -join "`n") -Encoding UTF8
+    } catch { }
+
+    return @{ Code = $code; Output = $all }
+}
+
 if ($Uninstall) {
     Step "Удаление claude-auto"
     if (-not (Test-OurRepo $Root)) { throw "В $Root не найден проект claude-auto. Ничего не удалено." }
@@ -75,15 +109,22 @@ if ($Uninstall) {
     if (Test-Path -LiteralPath $DataDir) { Remove-Item -LiteralPath $DataDir -Recurse -Force }
     Ok "команда и данные удалены"
 
-    # Выходим из папки проекта, иначе Windows не даст её удалить.
     Set-Location $env:USERPROFILE
     try {
         Remove-Item -LiteralPath $Root -Recurse -Force
         Ok "папка проекта удалена"
     }
     catch {
-        $cmd = "Start-Sleep -Seconds 3; Remove-Item -LiteralPath '$Root' -Recurse -Force"
-        Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-Command", $cmd
+        $inner = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+Start-Sleep -Seconds 3
+for (`$i = 1; `$i -le 20; `$i++) {
+    if (-not (Test-Path -LiteralPath '$($Root.Replace("'","''"))')) { break }
+    Remove-Item -LiteralPath '$($Root.Replace("'","''"))' -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath '$($Root.Replace("'","''"))') { Start-Sleep -Seconds 1 }
+}
+"@
+        Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-Command", $inner
         Warn "папка занята, удалю её в фоне через пару секунд: $Root"
     }
     Write-Host "`nFCC и Claude Code не тронуты." -ForegroundColor Green
@@ -113,14 +154,48 @@ try {
     Ok "FCC найден"
 
     Step "3/5 claude-auto"
-    uv tool install --force $Root
-    if ($LASTEXITCODE -ne 0) { throw "uv tool install завершился с ошибкой" }
+
+    $tomlPath = Join-Path $Root "pyproject.toml"
+    if (-not (Test-Path -LiteralPath $tomlPath)) { throw "Не найден pyproject.toml в $Root" }
+    $toml = Get-Content -LiteralPath $tomlPath -Raw
+    if ($toml -notmatch 'name\s*=\s*"claude-auto"') {
+        Warn "в pyproject.toml не найдено name = `"claude-auto`". uv может установить не тот пакет."
+    }
+
+    try { uv cache clean 2>&1 | Out-Null } catch { }
+
+    # Расширенный набор попыток: от самой совместимой к более агрессивной.
+    $attempts = @(
+        @{ Name = "базовая";                          Args = @("tool", "install", "--force", $Root) },
+        @{ Name = "без build-isolation";              Args = @("tool", "install", "--force", "--no-build-isolation", $Root) },
+        @{ Name = "с Python 3.12";                    Args = @("tool", "install", "--force", "--python", "3.12", $Root) },
+        @{ Name = "с Python 3.11";                    Args = @("tool", "install", "--force", "--python", "3.11", $Root) },
+        @{ Name = "с Python 3.11 без isolation";      Args = @("tool", "install", "--force", "--python", "3.11", "--no-build-isolation", $Root) },
+        @{ Name = "без кэша и с reinstall";           Args = @("tool", "install", "--force", "--no-cache", "--reinstall", $Root) }
+    )
+
+    $installed = $false
+    $lastOutput = @()
+    foreach ($a in $attempts) {
+        Write-Host "    попытка: $($a.Name)" -ForegroundColor DarkGray
+        $r = Invoke-Captured "uv" $a.Args
+        if ($r.Code -eq 0) { $installed = $true; break }
+        $lastOutput = $r.Output
+        Warn "попытка '$($a.Name)' не удалась (exit $($r.Code))"
+    }
+
+    if (-not $installed) {
+        Write-Host "`nПолный вывод uv (последняя попытка):" -ForegroundColor Red
+        foreach ($line in $lastOutput) { Write-Host "    $line" -ForegroundColor Red }
+        throw "uv tool install не удался. Полный лог: $LogFile"
+    }
+
     Refresh-Path
     Ok "claude-auto установлен"
 
     Step "4/5 Проверка"
     claude-auto --help | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "claude-auto --help не работает" }
+    if ($LASTEXITCODE -ne 0) { throw "claude-auto --help не работает (exit $LASTEXITCODE). Смотрите лог: $LogFile" }
     Ok "claude-auto работает"
 
     Step "5/5 Манифест"

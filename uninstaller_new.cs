@@ -1,0 +1,452 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+
+[assembly: System.Reflection.AssemblyVersion("1.0.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.2.0")]
+
+class UninstallLauncher
+{
+    // Константы
+    const string APP_NAME = "fcc-auto-claude";
+    const string INSTALL_DIR = @"C:\Program Files (x86)\fcc-auto-claude";
+
+    // ===================== Restart Manager P/Invoke =====================
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RM_UNIQUE_PROCESS
+    {
+        public int dwProcessId;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct RM_PROCESS_INFO
+    {
+        public RM_UNIQUE_PROCESS Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        public string strAppName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+        public string strServiceShortName;
+        public int ApplicationType;
+        public uint AppStatus;
+        public uint TSSessionId;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bRestartable;
+    }
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags, StringBuilder strSessionKey);
+
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmEndSession(uint pSessionHandle);
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmRegisterResources(uint pSessionHandle,
+        uint nFiles, string[] rgsFilenames,
+        uint nApplications, RM_UNIQUE_PROCESS[] rgApplications,
+        uint nServices, string[] rgsServiceNames);
+
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmGetList(uint dwSessionHandle,
+        out uint pnProcInfoNeeded,
+        ref uint pnProcInfo,
+        [In, Out] RM_PROCESS_INFO[] rgAffectedApps,
+        ref uint lpdwRebootReasons);
+
+    const int ERROR_MORE_DATA = 234;
+
+    // ================================ Main ==============================
+
+    static int Main(string[] args)
+    {
+        string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        bool silent = args.Any(a =>
+            string.Equals(a, "-Silent", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "/silent", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "-Yes", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "/yes", StringComparison.OrdinalIgnoreCase));
+
+        bool skipFcc = args.Any(a =>
+            string.Equals(a, "-SkipFcc", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "--skip-fcc", StringComparison.OrdinalIgnoreCase));
+
+        // Safety: не даём снести корень диска или профиль пользователя
+        if (exeDir.Length <= 3 ||
+            string.Equals(exeDir, Path.GetPathRoot(exeDir), StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(exeDir, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("Небезопасное расположение установщика: " + exeDir);
+            Pause();
+            return 2;
+        }
+
+        // --- ГЛАВНОЕ: проверка блокирующих процессов ДО удаления ---
+        Console.WriteLine("Проверка файлов, открытых в других программах...");
+        if (!EnsureNoLockingProcesses(exeDir))
+        {
+            Console.WriteLine("\nУдаление отменено пользователем.");
+            Pause();
+            return 3;
+        }
+
+        // Прямое удаление на C# (нет зависимости от uninstall.ps1)
+        int code = RunDirectUninstall(silent, skipFcc);
+
+        if (code == 0)
+        {
+            // --- Повторная проверка: пользователь мог открыть что-то за время удаления ---
+            Console.WriteLine("\nПовторная проверка блокирующих процессов...");
+            if (EnsureNoLockingProcesses(exeDir))
+            {
+                ScheduleFolderCleanup(exeDir, Process.GetCurrentProcess().Id);
+            }
+            else
+            {
+                code = 4;
+                Console.WriteLine("\nВНИМАНИЕ: автоматическое удаление папки отменено.");
+                Console.WriteLine("Удалите вручную после закрытия всех программ: " + exeDir);
+            }
+        }
+
+        if (code == 0)
+            Console.WriteLine("\nУДАЛЕНИЕ ЗАВЕРШЕНО. Остатки папки будут удалены через несколько секунд. Нажмите любую клавишу...");
+        else if (code == 3 || code == 4)
+            Console.WriteLine("\nУДАЛЕНИЕ НЕ ЗАВЕРШЕНО (код " + code + "). Нажмите любую клавишу...");
+        else
+            Console.WriteLine("\nУДАЛЕНИЕ ЗАВЕРШИЛОСЬ С ОШИБКОЙ (код " + code + "). Нажмите любую клавишу...");
+
+        Pause();
+        return code;
+    }
+
+    static int RunDirectUninstall(bool silent, bool skipFcc)
+    {
+        Console.WriteLine("Прямое удаление без PowerShell скрипта...");
+
+        try
+        {
+            // 1. Удаляем FCC
+            if (!skipFcc)
+            {
+                Console.WriteLine("Удаление FCC...");
+                UninstallFCC();
+                Console.WriteLine("  OK: FCC удалён");
+            }
+            else
+            {
+                Console.WriteLine("Удаление FCC (пропущено --skip-fcc)");
+            }
+
+            // 2. Удаляем файлы программы
+            Console.WriteLine("Удаление файлов программы...");
+            if (Directory.Exists(INSTALL_DIR))
+            {
+                RemoveDirectoryWithRetry(INSTALL_DIR);
+            }
+            Console.WriteLine("  OK: Файлы программы удалены");
+
+            // 3. Удаляем из реестра
+            Console.WriteLine("Удаление записей реестра...");
+            UnregisterUninstaller();
+            Console.WriteLine("  OK: Записи реестра удалены");
+
+            // 4. Удаляем из PATH
+            Console.WriteLine("Очистка PATH...");
+            RemoveFromPath(INSTALL_DIR);
+            Console.WriteLine("  OK: PATH очищен");
+
+            Console.WriteLine("\nУДАЛЕНИЕ ЗАВЕРШЕНО.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("ОШИБКА УДАЛЕНИЯ: " + ex.Message);
+            return 1;
+        }
+    }
+
+    static void UninstallFCC()
+    {
+        // Удаляем известные пути FCC
+        string[] fccPaths = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "fcc-server"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".fcc"),
+        };
+
+        foreach (string path in fccPaths)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                else if (Directory.Exists(path)) RemoveDirectoryWithRetry(path);
+            }
+            catch { }
+        }
+
+        // Пробуем через uv tool uninstall
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "uv",
+                Arguments = "tool uninstall free-claude-code",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using (var p = Process.Start(psi))
+            {
+                p.WaitForExit();
+            }
+        }
+        catch { }
+    }
+
+    static void RemoveDirectoryWithRetry(string dir, int maxRetries = 10)
+    {
+        for (int i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) return;
+                Directory.Delete(dir, true);
+                return;
+            }
+            catch (IOException)
+            {
+                System.Threading.Thread.Sleep(500);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                System.Threading.Thread.Sleep(500);
+            }
+        }
+        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+    }
+
+    static void UnregisterUninstaller()
+    {
+        try
+        {
+            Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(
+                String.Format(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{0}", APP_NAME), false);
+        }
+        catch { }
+    }
+
+    static void RemoveFromPath(string installDir)
+    {
+        try
+        {
+            string currentPath = Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Machine) ?? "";
+            var parts = currentPath.Split(';').Where(p => !string.Equals(p.Trim(), installDir, StringComparison.OrdinalIgnoreCase)).ToArray();
+            string newPath = string.Join(";", parts);
+            Environment.SetEnvironmentVariable("PATH", newPath, EnvironmentVariableTarget.Machine);
+        }
+        catch { }
+    }
+
+    // ===================== Детектор блокировок ==========================
+
+    static bool EnsureNoLockingProcesses(string folder)
+    {
+        if (Console.IsInputRedirected) return true;
+
+        int attempts = 0;
+        while (true)
+        {
+            var lockers = GetLockingProcesses(folder);
+            if (lockers.Count == 0) return true;
+
+            Console.WriteLine();
+            Console.WriteLine("Файлы в папке открыты следующими программами:");
+            foreach (var p in lockers)
+            {
+                string nm = "?";
+                int id = -1;
+                try { nm = p.ProcessName + ".exe"; id = p.Id; } catch { }
+                Console.WriteLine("  - " + nm + " (PID " + id + ")");
+            }
+            Console.WriteLine();
+            Console.WriteLine("Закройте эти программы. Возможна потеря несохранённых данных!");
+            Console.WriteLine("  [K]   Завершить их принудительно");
+            Console.WriteLine("  [др.] Повторить проверку");
+            Console.WriteLine("  [Esc] Отмена");
+
+            var key = Console.ReadKey(true);
+            if (key.Key == ConsoleKey.Escape) return false;
+
+            if (key.KeyChar == 'k' || key.KeyChar == 'K' ||
+                key.KeyChar == 'к' || key.KeyChar == 'К')
+            {
+                if (!IsAdministrator())
+                    Console.WriteLine("ВНИМАНИЕ: запуск без прав администратора — некоторые процессы могут не завершиться.");
+
+                foreach (var p in lockers)
+                {
+                    int id = -1; string nm = "?";
+                    try { id = p.Id; nm = p.ProcessName; } catch { }
+                    try
+                    {
+                        p.Kill();
+                        p.WaitForExit(5000);
+                        Console.WriteLine("  Завершён: " + nm + " (PID " + id + ")");
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("  Не удалось завершить PID " + id + ": " + ex.Message);
+                    }
+                }
+            }
+
+            if (++attempts > 20)
+            {
+                Console.WriteLine("Слишком много попыток. Выход.");
+                return false;
+            }
+        }
+    }
+
+    static List<Process> GetLockingProcesses(string folder)
+    {
+        var result = new List<Process>();
+
+        string[] files;
+        try { files = Directory.GetFiles(folder, "*", SearchOption.AllDirectories); }
+        catch { return result; }
+        if (files.Length == 0) return result;
+
+        uint session = 0;
+        var key = new StringBuilder(64);
+        int rv = RmStartSession(out session, 0, key);
+        if (rv != 0) return result;
+
+        try
+        {
+            rv = RmRegisterResources(session, (uint)files.Length, files, 0, null, 0, null);
+            if (rv != 0) return result;
+
+            uint needed = 0, count = 0, reasons = 0;
+            rv = RmGetList(session, out needed, ref count, null, ref reasons);
+            if (rv != ERROR_MORE_DATA) return result;
+
+            count = needed;
+            var infos = new RM_PROCESS_INFO[count];
+            rv = RmGetList(session, out needed, ref count, infos, ref reasons);
+            if (rv != 0) return result;
+
+            int myPid = Process.GetCurrentProcess().Id;
+            for (int i = 0; i < count; i++)
+            {
+                int pid = infos[i].Process.dwProcessId;
+                if (pid == myPid) continue;
+                try { result.Add(Process.GetProcessById(pid)); }
+                catch { }
+            }
+        }
+        finally { RmEndSession(session); }
+
+        return result;
+    }
+
+    static bool IsAdministrator()
+    {
+        try
+        {
+            var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var pr = new System.Security.Principal.WindowsPrincipal(id);
+            return pr.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch { return false; }
+    }
+
+    // ===================== Фоновое удаление =============================
+
+    static void ScheduleFolderCleanup(string folder, int myPid)
+    {
+        try
+        {
+            string temp = Path.GetTempPath();
+            string ps1 = Path.Combine(temp, "claude-auto-cleanup-" + Guid.NewGuid().ToString("N") + ".ps1");
+            string log = Path.Combine(temp, "claude-auto-cleanup.log");
+
+            string folderQ = folder.Replace("'", "''");
+            string ps1Q = ps1.Replace("'", "''");
+            string logQ = log.Replace("'", "''");
+
+            var sb = new StringBuilder();
+            sb.AppendLine("$ErrorActionPreference = 'Continue'");
+            sb.AppendLine("Start-Transcript -Path '" + logQ + "' -Force | Out-Null");
+            sb.AppendLine("try {");
+            sb.AppendLine("  $me = " + myPid);
+            sb.AppendLine("  $folder = '" + folderQ + "'");
+            sb.AppendLine("");
+            sb.AppendLine("  try { Wait-Process -Id $me -Timeout 30 -ErrorAction SilentlyContinue } catch { }");
+            sb.AppendLine("");
+            sb.AppendLine("  for ($i = 0; $i -lt 30; $i++) {");
+            sb.AppendLine("    $busy = Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" |");
+            sb.AppendLine("      Where-Object { $_.CommandLine -and $_.CommandLine.Contains($folder) }");
+            sb.AppendLine("    if (-not $busy) { break }");
+            sb.AppendLine("    Start-Sleep -Seconds 1");
+            sb.AppendLine("  }");
+            sb.AppendLine("  Start-Sleep -Seconds 2");
+            sb.AppendLine("");
+            sb.AppendLine("  for ($i = 1; $i -le 10; $i++) {");
+            sb.AppendLine("    if (-not (Test-Path -LiteralPath $folder)) {");
+            sb.AppendLine("      Write-Output ('OK: папка удалена на попытке ' + $i)");
+            sb.AppendLine("      break");
+            sb.AppendLine("    }");
+            sb.AppendLine("    try {");
+            sb.AppendLine("      Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction Stop");
+            sb.AppendLine("      Write-Output ('OK: папка удалена на попытке ' + $i)");
+            sb.AppendLine("      break");
+            sb.AppendLine("    } catch {");
+            sb.AppendLine("      Write-Output ('попытка ' + $i + ': ' + $_.Exception.Message)");
+            sb.AppendLine("      Start-Sleep -Seconds 1");
+            sb.AppendLine("    }");
+            sb.AppendLine("  }");
+            sb.AppendLine("");
+            sb.AppendLine("  if (Test-Path -LiteralPath $folder) {");
+            sb.AppendLine("    Write-Output 'ОСТАЛОСЬ: папка не удалена после 10 попыток'");
+            sb.AppendLine("    Get-ChildItem -LiteralPath $folder -Force | ForEach-Object { Write-Output ('  ' + $_.Name) }");
+            sb.AppendLine("  } else {");
+            sb.AppendLine("    Write-Output 'ИТОГ: папка удалена полностью'");
+            sb.AppendLine("  }");
+            sb.AppendLine("} finally {");
+            sb.AppendLine("  Stop-Transcript | Out-Null");
+            sb.AppendLine("  Start-Sleep -Milliseconds 500");
+            sb.AppendLine("  Remove-Item -LiteralPath '" + ps1Q + "' -Force -ErrorAction SilentlyContinue");
+            sb.AppendLine("}");
+            File.WriteAllText(ps1, sb.ToString(), new UTF8Encoding(false));
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + ps1 + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            Process.Start(psi);
+        }
+        catch { }
+    }
+
+    static void Pause()
+    {
+        try
+        {
+            if (!Console.IsInputRedirected)
+                Console.ReadKey(intercept: true);
+        }
+        catch { }
+    }
+}

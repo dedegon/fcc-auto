@@ -12,6 +12,7 @@ from pathlib import Path
 
 import scanner_config as cfg
 from claude_filter import alias_for, start_filter
+from model_limits.registry import LimitsRegistry
 from scanner import CACHE_DIR, ModelScanner, fcc_provider_status, provider_keys
 
 HELP = {
@@ -38,7 +39,7 @@ HELP = {
             ("claude-auto --list", "список проверенных моделей"),
             ("cd D:\\проект", "сначала перейти в папку проекта; Claude Code откроется там"),
             ("claude-auto --offs", "без сканирования, сразу из кэша"),
-            ("claude-auto --skip groq/openai/gpt-oss-20b", "исключить модель"),
+            ("claude-auto --skip nvidia_nim/nemotron-3-ultra", "исключить модель"),
             ("claude-auto -- -p \"текст\"", "передать аргументы в Claude Code"),
         ],
         "note": ("Язык определяется по языку Windows. Принудительно: "
@@ -67,7 +68,7 @@ HELP = {
             ("claude-auto --list", "list verified models"),
             ("cd D:\\project", "go to the project folder first; Claude Code opens there"),
             ("claude-auto --offs", "skip scanning, start from cache"),
-            ("claude-auto --skip groq/openai/gpt-oss-20b", "exclude a model"),
+            ("claude-auto --skip nvidia_nim/nemotron-3-ultra", "exclude a model"),
             ("claude-auto -- -p \"text\"", "pass arguments to Claude Code"),
         ],
         "note": ("Language follows the Windows language. To force it: "
@@ -76,9 +77,9 @@ HELP = {
 }
 
 # Провайдеры, о которых сообщаем пользователю: (id FCC, название, переменная ключа, где взять ключ).
+# Groq исключён
 PROVIDER_LINKS = [
     ("open_router", "OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
-    ("groq", "Groq", "GROQ_API_KEY", "https://console.groq.com/keys"),
     ("nvidia_nim", "NVIDIA NIM", "NVIDIA_NIM_API_KEY", "https://build.nvidia.com/settings/api-keys"),
 ]
 
@@ -175,8 +176,14 @@ def ensure_server() -> bool:
         return False
     print("Запускаю fcc-server...")
     flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-    subprocess.Popen([exe], env={**os.environ, "PORT": str(cfg.PORT)},
-                     creationflags=flags, cwd=str(CACHE_DIR.parent))
+    env = {**os.environ}
+    # In test mode, pass USERPROFILE and PORT from env (already set by test_main)
+    if os.environ.get("CLAUDE_AUTO_TEST_MODE") == "1":
+        env["USERPROFILE"] = os.environ["USERPROFILE"]
+        env["PORT"] = os.environ["CLAUDE_AUTO_PORT"]
+    else:
+        env["PORT"] = str(cfg.PORT)
+    subprocess.Popen([exe], env=env, creationflags=flags, cwd=os.environ.get("USERPROFILE"))
     deadline = time.time() + 90
     while time.time() < deadline:
         if port_open():
@@ -196,7 +203,12 @@ def write_settings(models: list[str]) -> str:
 
 def saved_user_model() -> str | None:
     """Модель, выбранная через /model (поле model в ~/.claude/settings.json)."""
-    path = Path.home() / ".claude" / "settings.json"
+    # In test mode, use test settings path
+    test_mode = os.environ.get("CLAUDE_AUTO_TEST_MODE", "") == "1"
+    if test_mode:
+        path = CACHE_DIR / "claude-settings.json"
+    else:
+        path = Path.home() / ".claude" / "settings.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
@@ -205,12 +217,12 @@ def saved_user_model() -> str | None:
     return value or None
 
 
-def model_labels(scanner: ModelScanner) -> dict[str, str]:
+def model_labels(scanner: ModelScanner, limits: LimitsRegistry) -> dict[str, str]:
     """Проверенные модели с подписью лимита: её видно в панели /model Claude Code."""
     labels: dict[str, str] = {}
     for fid in scanner.usable():
-        limit = scanner.entries[fid].get("limit_tpm")
-        labels[fid] = f"{fid}  [лимит {limit} токенов/мин]" if limit else f"{fid}  [без лимита]"
+        limit_desc = limits.describe(fid)
+        labels[fid] = limit_desc
     return labels
 
 
@@ -229,6 +241,7 @@ def main() -> None:
                         default=cfg.DEFAULT_TIMEOUT_MS)
     parser.add_argument("--max-wait", type=float, default=cfg.DEFAULT_MAX_WAIT_S)
     parser.add_argument("--workers", type=int, default=cfg.DEFAULT_WORKERS)
+    parser.add_argument("--rescan", action="store_true", help="перепроверить все модели")
     args, claude_args = parser.parse_known_args()
     if claude_args and claude_args[0] == "--":
         claude_args = claude_args[1:]
@@ -238,6 +251,8 @@ def main() -> None:
         scanner.mark(fid, "fail", "исключена пользователем")
 
     if args.list:
+        if args.rescan:
+            print("--rescan ignored with --list; run --rescan separately", file=sys.stderr)
         for i, fid in enumerate(scanner.usable(), 1):
             print(f"{i:>3}. {fid}  ({scanner.entries[fid]['latency']}s)")
         return
@@ -259,7 +274,7 @@ def main() -> None:
             print_setup(lang)
             sys.exit(2)
         print()
-        scanner.scan(force=True, timeout_s=args.timeout_ms / 1000,
+        scanner.scan(force=args.rescan, timeout_s=args.timeout_ms / 1000,
                      max_wait_s=args.max_wait, workers=args.workers, providers=keys)
     else:
         print("Режим --offline: сканирование пропущено, берём проверенные из кэша.")
@@ -269,7 +284,13 @@ def main() -> None:
         print("Нет проверенных моделей с поддержкой инструментов.")
         sys.exit(1)
 
-    srv = start_filter(f"http://127.0.0.1:{cfg.PORT}", lambda: model_labels(ModelScanner()))
+    limits = LimitsRegistry(CACHE_DIR / "limits.json")
+    srv = start_filter(
+        f"http://127.0.0.1:{cfg.PORT}",
+        lambda: set(scanner.usable()),
+        limits,
+        get_window=scanner.get_context_window,
+    )
     claude_bin = shutil.which("claude")
     if not claude_bin:
         print("Claude Code не найден в PATH.")
@@ -305,6 +326,29 @@ def main() -> None:
     finally:
         srv.shutdown()
     sys.exit(rc)
+
+
+def test_main() -> None:
+    """Тестовый entry point: порт 18082, изолированный кэш, не трогает ~/.fcc/.env и ~/.claude."""
+    test_home = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "claude-auto-test" / "fcc-home"
+    test_home.mkdir(parents=True, exist_ok=True)
+    # Удалить тестовую .fcc (включая fcc.db с боевыми ключами) ПЕРЕД запуском
+    test_fcc_dir = test_home / ".fcc"
+    if test_fcc_dir.exists():
+        shutil.rmtree(test_fcc_dir)
+    test_fcc_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["CLAUDE_AUTO_PORT"] = "18082"
+    os.environ["USERPROFILE"] = str(test_home)
+    os.environ["CLAUDE_AUTO_DATA_DIR"] = str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "claude-auto-test")
+    os.environ["CLAUDE_AUTO_TEST_MODE"] = "1"
+    # Re-initialize scanner module constants after env vars are set
+    import scanner
+    scanner.ENV_FILE = scanner.get_env_file()
+    scanner.CACHE_DIR = scanner.get_cache_dir()
+    scanner.CACHE_FILE = scanner.get_cache_file()
+    print(f"[TEST MODE] CACHE_DIR={os.environ.get('CLAUDE_AUTO_DATA_DIR')}, USERPROFILE={os.environ.get('USERPROFILE')}, PORT={os.environ.get('CLAUDE_AUTO_PORT')}")
+    # Не трогаем ~/.fcc/.env и ~/.claude/settings.json - используем отдельные пути
+    main()
 
 
 if __name__ == "__main__":
