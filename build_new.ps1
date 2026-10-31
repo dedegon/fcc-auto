@@ -78,7 +78,7 @@ if (-not $launcherOk) { throw "РљРѕРјРїРёР»СЏС†РёСЏ launche
 
 Write-Host "РЎРѕР±СЂР°РЅРѕ: $launcherExe (uninstall.exe РІРЅРµРґСЂС‘РЅ РєР°Рє СЂРµСЃСѓСЂСЃ, UAC РјР°РЅРёС„РµСЃС‚)" -ForegroundColor Green
 
-# 4. РЎРѕР·РґР°С‘Рј standalone РІРµСЂСЃРёСЋ (РєРѕРїРёСЏ СЃ РІРµСЂСЃРёРµР№ РІ РёРјРµРЅРё) РІ dist/
+# 4. Standalone version (copy with versioned name)
 Copy-Item -LiteralPath $launcherExe -Destination $standaloneExe -Force
 Write-Host "РЎРѕР·РґР°РЅ standalone СѓСЃС‚Р°РЅРѕРІС‰РёРє: $standaloneExe" -ForegroundColor Green
 
