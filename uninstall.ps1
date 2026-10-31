@@ -93,10 +93,12 @@ try {
 
     Write-Host "`n=== УДАЛЕНИЕ ЗАВЕРШЕНО УСПЕШНО ===" -ForegroundColor Green
     Write-Host "fcc-auto-claude и FCC полностью удалены из системы." -ForegroundColor Green
-    exit 0
 }
 catch {
     Write-Host "`nОШИБКА УДАЛЕНИЯ: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Попробуйте запустить от имени администратора." -ForegroundColor Yellow
     exit 1
+}
+finally {
+    # Пустой finally для парсера
 }

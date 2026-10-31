@@ -7,14 +7,16 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
-[assembly: System.Reflection.AssemblyVersion("1.0.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
 
 class UninstallLauncher
 {
     // Константы
-    const string APP_NAME = "fcc-auto-claude";
-    const string INSTALL_DIR = @"C:\Program Files (x86)\fcc-auto-claude";
+    const string APP_NAME = "claude-auto";
+    const string INSTALL_DIR = @"C:\Program Files (x86)\claude-auto";
+    // Версия/коммит FCC для uninstall --purge-fcc (обновлять при изменении)
+    const string FCC_REPO_COMMIT = "a54c5b1"; // 1.0.4 commit
 
     // ===================== Restart Manager P/Invoke =====================
 
@@ -76,12 +78,24 @@ class UninstallLauncher
             string.Equals(a, "-SkipFcc", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(a, "--skip-fcc", StringComparison.OrdinalIgnoreCase));
 
+        bool purgeFcc = args.Any(a =>
+            string.Equals(a, "-PurgeFcc", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "--purge-fcc", StringComparison.OrdinalIgnoreCase));
+
         // Safety: не даём снести корень диска или профиль пользователя
         if (exeDir.Length <= 3 ||
             string.Equals(exeDir, Path.GetPathRoot(exeDir), StringComparison.OrdinalIgnoreCase) ||
             string.Equals(exeDir, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.OrdinalIgnoreCase))
         {
             Console.Error.WriteLine("Небезопасное расположение установщика: " + exeDir);
+            Pause();
+            return 2;
+        }
+
+        // Проверка: папка установки принадлежит проекту (есть pyproject.toml с name = "claude-auto")
+        if (!IsOurInstallDir(exeDir))
+        {
+            Console.Error.WriteLine("Папка " + exeDir + " не содержит проекта claude-auto (нет pyproject.toml с name = \"claude-auto\"). Удаление отменено.");
             Pause();
             return 2;
         }
@@ -96,7 +110,7 @@ class UninstallLauncher
         }
 
         // Прямое удаление на C# (нет зависимости от uninstall.ps1)
-        int code = RunDirectUninstall(silent, skipFcc);
+        int code = RunDirectUninstall(silent, skipFcc, purgeFcc);
 
         if (code == 0)
         {
@@ -125,25 +139,54 @@ class UninstallLauncher
         return code;
     }
 
-    static int RunDirectUninstall(bool silent, bool skipFcc)
+    static int RunDirectUninstall(bool silent, bool skipFcc, bool purgeFcc)
     {
         Console.WriteLine("Прямое удаление без PowerShell скрипта...");
 
+        // Читаем манифест для проверки fcc_preexisting
+        bool fccPreexisting = ReadManifestFccPreexisting();
+
         try
         {
-            // 1. Удаляем FCC
-            if (!skipFcc)
+            // 1. Удаляем FCC только если fcc_preexisting=false И передан --purge-fcc
+            bool shouldRemoveFcc = !fccPreexisting && purgeFcc;
+            if (shouldRemoveFcc)
             {
-                Console.WriteLine("Удаление FCC...");
+                Console.WriteLine("Удаление FCC (--purge-fcc, fcc_preexisting=false)...");
                 UninstallFCC();
                 Console.WriteLine("  OK: FCC удалён");
             }
+            else if (fccPreexisting)
+            {
+                Console.WriteLine("FCC не удаляется: установлен до установки claude-auto (fcc_preexisting=true). Используйте --purge-fcc для принудительного удаления.");
+            }
             else
             {
-                Console.WriteLine("Удаление FCC (пропущено --skip-fcc)");
+                Console.WriteLine("Удаление FCC (пропущено: используйте --purge-fcc для удаления)");
             }
 
-            // 2. Удаляем файлы программы
+            // 2. Удаляем claude-auto через uv
+            Console.WriteLine("Удаление claude-auto (uv tool uninstall)...");
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "uv",
+                    Arguments = "tool uninstall claude-auto",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit();
+                }
+                Console.WriteLine("  OK: claude-auto удалён");
+            }
+            catch { Console.WriteLine("  ВНИМАНИЕ: uv tool uninstall не удался (возможно, уже удален)"); }
+
+            // 3. Удаляем файлы программы
             Console.WriteLine("Удаление файлов программы...");
             if (Directory.Exists(INSTALL_DIR))
             {
@@ -151,12 +194,23 @@ class UninstallLauncher
             }
             Console.WriteLine("  OK: Файлы программы удалены");
 
-            // 3. Удаляем из реестра
+            // 4. Удаляем данные и кэш в %LOCALAPPDATA%\claude-auto
+            Console.WriteLine("Удаление данных и кэша...");
+            string dataDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "claude-auto");
+            if (Directory.Exists(dataDir))
+            {
+                RemoveDirectoryWithRetry(dataDir);
+            }
+            Console.WriteLine("  OK: Данные и кэш удалены");
+
+            // 5. Удаляем из реестра
             Console.WriteLine("Удаление записей реестра...");
             UnregisterUninstaller();
             Console.WriteLine("  OK: Записи реестра удалены");
 
-            // 4. Удаляем из PATH
+            // 6. Удаляем из PATH
             Console.WriteLine("Очистка PATH...");
             RemoveFromPath(INSTALL_DIR);
             Console.WriteLine("  OK: PATH очищен");
@@ -173,10 +227,56 @@ class UninstallLauncher
 
     static void UninstallFCC()
     {
-        // Удаляем известные пути FCC
+        // Сначала пробуем запустить официальный uninstall.ps1 из репозитория FCC по зафиксированному коммиту
+        // URL: https://raw.githubusercontent.com/Alishahryar1/free-claude-code/<commit>/scripts/uninstall.ps1
+        string fccUninstallUrl = "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/" + FCC_REPO_COMMIT + "/scripts/uninstall.ps1";
+
+        try
+        {
+            Console.WriteLine("  Запуск официального uninstall.ps1 FCC (commit " + FCC_REPO_COMMIT + ")...");
+            System.Net.ServicePointManager.SecurityProtocol =
+                System.Net.SecurityProtocolType.Tls12
+                | System.Net.SecurityProtocolType.Tls11
+                | System.Net.SecurityProtocolType.Tls;
+
+            using (var http = new System.Net.WebClient())
+            {
+                http.Headers.Add("User-Agent", "claude-auto-uninstaller");
+                string script = http.DownloadString(fccUninstallUrl);
+
+                string tempScript = Path.Combine(Path.GetTempPath(), "fcc_uninstall.ps1");
+                File.WriteAllText(tempScript, script, Encoding.UTF8);
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + tempScript + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    string error = p.StandardError.ReadToEnd();
+                    p.WaitForExit();
+                    if (!string.IsNullOrEmpty(output)) Console.WriteLine(output);
+                    if (!string.IsNullOrEmpty(error)) Console.Error.WriteLine(error);
+                }
+                try { File.Delete(tempScript); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("  ВНИМАНИЕ: официальный uninstall не удался: " + ex.Message);
+        }
+
+        // Fallback: удаляем известные пути FCC вручную
         string[] fccPaths = new[]
         {
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "fcc-server"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "fcc-server.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".fcc"),
         };
 
@@ -208,6 +308,48 @@ class UninstallLauncher
             }
         }
         catch { }
+    }
+
+    static bool ReadManifestFccPreexisting()
+    {
+        try
+        {
+            string dataDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "claude-auto");
+            string manifestPath = Path.Combine(dataDir, "install.json");
+            if (!File.Exists(manifestPath)) return false;
+
+            string json = File.ReadAllText(manifestPath, Encoding.UTF8);
+            // Простой парсинг "fcc_preexisting": true/false
+            int idx = json.IndexOf("\"fcc_preexisting\"");
+            if (idx >= 0)
+            {
+                idx = json.IndexOf(':', idx);
+                if (idx >= 0)
+                {
+                    string rest = json.Substring(idx + 1).TrimStart();
+                    if (rest.StartsWith("true", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                    if (rest.StartsWith("false", StringComparison.OrdinalIgnoreCase))
+                        return false;
+                }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    static bool IsOurInstallDir(string dir)
+    {
+        try
+        {
+            string pyprojectPath = Path.Combine(dir, "pyproject.toml");
+            if (!File.Exists(pyprojectPath)) return false;
+            string content = File.ReadAllText(pyprojectPath, Encoding.UTF8);
+            return content.Contains("name") && content.Contains("claude-auto");
+        }
+        catch { return false; }
     }
 
     static void RemoveDirectoryWithRetry(string dir, int maxRetries = 10)

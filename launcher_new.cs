@@ -10,17 +10,19 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 
-[assembly: System.Reflection.AssemblyVersion("1.0.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
 
 class InstallLauncher
 {
     // Константы
-    const string APP_NAME = "fcc-auto-claude";
-    const string INSTALL_DIR = @"C:\Program Files (x86)\fcc-auto-claude";
+    const string APP_NAME = "claude-auto";
+    const string INSTALL_DIR = @"C:\Program Files (x86)\claude-auto";
     const string FCC_INSTALL_URL = "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1";
+    // Версия/коммит FCC для uninstall --purge-fcc (обновлять при изменении)
+    const string FCC_REPO_COMMIT = "a54c5b1"; // 1.0.4 commit
     const string GITHUB_REPO = "https://github.com/your-repo/fcc-auto"; // Заменить на реальный репозиторий
-    const string VERSION = "1.0.2";
+    const string VERSION = "1.0.0";
 
     // ================================ Main ==============================
 
@@ -119,8 +121,14 @@ class InstallLauncher
             await CopyProgramFiles(exeDir, INSTALL_DIR);
             Ok("Файлы программы скопированы");
 
-            // 3. Устанавливаем FCC
-            if (!skipFcc)
+            // 3. Определяем FCC
+            bool fccPreexisting = DetectFCC();
+            if (fccPreexisting)
+            {
+                Step("Проверка FCC (Free Claude Code)");
+                Ok("FCC найден, пропуск");
+            }
+            else if (!skipFcc)
             {
                 Step("Установка FCC (Free Claude Code)");
                 await InstallFCC(silent);
@@ -132,20 +140,38 @@ class InstallLauncher
                 Ok("FCC пропущен");
             }
 
-            // 4. Создаём uninstall.exe
+            // 4. Устанавливаем claude-auto (всегда)
+            Step("Установка claude-auto");
+            await InstallClaudeAuto(exeDir);
+            Ok("claude-auto установлен");
+
+            // 5. Проверка claude-auto --help
+            Step("Проверка claude-auto --help");
+            if (!VerifyClaudeAuto())
+            {
+                throw new Exception("claude-auto --help не работает после установки");
+            }
+            Ok("claude-auto работает");
+
+            // 6. Создаём uninstall.exe
             Step("Создание uninstall.exe");
             ExtractUninstaller(INSTALL_DIR);
             Ok("uninstall.exe создан");
 
-            // 5. Создаём записи в реестре для Add/Remove Programs
+            // 7. Создаём записи в реестре для Add/Remove Programs
             Step("Регистрация в системе");
             RegisterUninstaller();
             Ok("Записи в реестре созданы");
 
-            // 6. Добавляем в PATH (опционально)
+            // 8. Добавляем в PATH (опционально)
             Step("Настройка PATH");
             AddToPath(INSTALL_DIR);
             Ok("PATH обновлён (перезапустите терминал)");
+
+            // 9. Манифест установки
+            Step("Создание манифеста установки");
+            WriteInstallManifest(fccPreexisting);
+            Ok("Манифест создан: %LOCALAPPDATA%\\claude-auto\\install.json");
 
             Console.WriteLine();
             string action = isUpdate ? "Обновление" : "Установка";
@@ -605,12 +631,175 @@ class InstallLauncher
     {
         try
         {
+            // Откат claude-auto через uv
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "uv",
+                    Arguments = "tool uninstall claude-auto",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit();
+                }
+            }
+            catch { }
+
             if (Directory.Exists(INSTALL_DIR))
                 RemoveDirectoryWithRetry(INSTALL_DIR);
             UnregisterUninstaller();
             RemoveFromPath(INSTALL_DIR);
         }
         catch { }
+    }
+
+    static bool DetectFCC()
+    {
+        // Проверка 1: fcc-server.exe в %USERPROFILE%\.local\bin
+        string fccExePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".local", "bin", "fcc-server.exe");
+        if (File.Exists(fccExePath))
+            return true;
+
+        // Проверка 2: fcc-server доступен через Get-Command (в PATH)
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -Command \"Get-Command fcc-server -ErrorAction SilentlyContinue\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using (var p = Process.Start(psi))
+            {
+                p.WaitForExit();
+                if (p.ExitCode == 0)
+                    return true;
+            }
+        }
+        catch { }
+
+        // Проверка 3: uv tool list показывает free-claude-code
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "uv",
+                Arguments = "tool list",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using (var p = Process.Start(psi))
+            {
+                string output = p.StandardOutput.ReadToEnd();
+                p.WaitForExit();
+                if (p.ExitCode == 0 && output.IndexOf("free-claude-code", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+        }
+        catch { }
+
+        return false;
+    }
+
+    static async Task InstallClaudeAuto(string exeDir)
+    {
+        // Находим pyproject.toml (может быть в родительской папке от exeDir)
+        string pyprojectDir = exeDir;
+        if (!File.Exists(Path.Combine(pyprojectDir, "pyproject.toml")))
+        {
+            string parentDir = Path.GetDirectoryName(exeDir);
+            if (Directory.Exists(parentDir) && File.Exists(Path.Combine(parentDir, "pyproject.toml")))
+            {
+                pyprojectDir = parentDir;
+            }
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "uv",
+            Arguments = "tool install --force \"" + pyprojectDir + "\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        using (var p = Process.Start(psi))
+        {
+            string output = await p.StandardOutput.ReadToEndAsync();
+            string error = await p.StandardError.ReadToEndAsync();
+            p.WaitForExit();
+
+            if (p.ExitCode != 0)
+            {
+                string msg = "uv tool install не удался (exit " + p.ExitCode + ")";
+                if (!string.IsNullOrEmpty(output)) msg += "\n" + output;
+                if (!string.IsNullOrEmpty(error)) msg += "\n" + error;
+                throw new Exception(msg);
+            }
+        }
+    }
+
+    static bool VerifyClaudeAuto()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "claude-auto",
+                Arguments = "--help",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using (var p = Process.Start(psi))
+            {
+                p.WaitForExit();
+                return p.ExitCode == 0;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static void WriteInstallManifest(bool fccPreexisting)
+    {
+        try
+        {
+            string dataDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "claude-auto");
+            Directory.CreateDirectory(dataDir);
+
+            string manifestPath = Path.Combine(dataDir, "install.json");
+            string fccPreexistingStr = fccPreexisting ? "true" : "false";
+            string json = "{\n" +
+                "  \"repo_path\": \"" + INSTALL_DIR.Replace("\\", "\\\\") + "\",\n" +
+                "  \"status\": \"installed\",\n" +
+                "  \"updated\": \"" + DateTime.UtcNow.ToString("s") + "\",\n" +
+                "  \"fcc_preexisting\": " + fccPreexistingStr + "\n" +
+                "}";
+            File.WriteAllText(manifestPath, json, Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("  ВНИМАНИЕ: не удалось записать манифест: " + ex.Message);
+        }
     }
 
     static bool IsAdministrator()

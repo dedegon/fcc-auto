@@ -9,3 +9,5 @@ scan_results.json
 cache.json
 claude-settings.json
 .env
+*.exe
+uv.lock
