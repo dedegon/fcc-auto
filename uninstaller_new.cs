@@ -145,25 +145,22 @@ class UninstallLauncher
         Console.WriteLine("Прямое удаление без PowerShell скрипта...");
 
         // Читаем манифест для проверки fcc_preexisting
-        bool fccPreexisting = ReadManifestFccPreexisting();
+        FccPreexistingStatus fccStatus = ReadManifestFccPreexisting();
 
         try
         {
-            // 1. Удаляем FCC только если fcc_preexisting=false И передан --purge-fcc
-            bool shouldRemoveFcc = !fccPreexisting && purgeFcc;
+            // 1. Решаем, удалять ли FCC (чистая функция, покрыта тестом)
+            bool shouldRemoveFcc = ShouldRemoveFcc(purgeFcc, fccStatus);
             if (shouldRemoveFcc)
             {
                 Console.WriteLine("Удаление FCC (--purge-fcc, fcc_preexisting=false)...");
                 UninstallFCC();
                 Console.WriteLine("  OK: FCC удалён");
             }
-            else if (fccPreexisting)
-            {
-                Console.WriteLine("FCC не удаляется: установлен до установки claude-auto (fcc_preexisting=true). Используйте --purge-fcc для принудительного удаления.");
-            }
             else
             {
-                Console.WriteLine("Удаление FCC (пропущено: используйте --purge-fcc для удаления)");
+                // Без флага --purge-fcc или при fcc_preexisting != false — FCC сохраняется
+                Console.WriteLine("FCC сохранён");
             }
 
             // 2. Удаляем claude-auto через uv
@@ -311,7 +308,16 @@ class UninstallLauncher
         catch { }
     }
 
-    static bool ReadManifestFccPreexisting()
+    // Результат чтения fcc_preexisting из манифеста
+    enum FccPreexistingStatus
+    {
+        True,       // fcc_preexisting = true
+        False,      // fcc_preexisting = false
+        Missing,    // манифест отсутствует, не читается, или поле отсутствует
+        Error       // ошибка парсинга
+    }
+
+    static FccPreexistingStatus ReadManifestFccPreexisting()
     {
         try
         {
@@ -319,26 +325,35 @@ class UninstallLauncher
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "claude-auto");
             string manifestPath = Path.Combine(dataDir, "install.json");
-            if (!File.Exists(manifestPath)) return false;
+            if (!File.Exists(manifestPath)) return FccPreexistingStatus.Missing;
 
             string json = File.ReadAllText(manifestPath, Encoding.UTF8);
             // Простой парсинг "fcc_preexisting": true/false
             int idx = json.IndexOf("\"fcc_preexisting\"");
-            if (idx >= 0)
-            {
-                idx = json.IndexOf(':', idx);
-                if (idx >= 0)
-                {
-                    string rest = json.Substring(idx + 1).TrimStart();
-                    if (rest.StartsWith("true", StringComparison.OrdinalIgnoreCase))
-                        return true;
-                    if (rest.StartsWith("false", StringComparison.OrdinalIgnoreCase))
-                        return false;
-                }
-            }
+            if (idx < 0) return FccPreexistingStatus.Missing;
+
+            idx = json.IndexOf(':', idx);
+            if (idx < 0) return FccPreexistingStatus.Missing;
+
+            string rest = json.Substring(idx + 1).TrimStart();
+            if (rest.StartsWith("true", StringComparison.OrdinalIgnoreCase))
+                return FccPreexistingStatus.True;
+            if (rest.StartsWith("false", StringComparison.OrdinalIgnoreCase))
+                return FccPreexistingStatus.False;
+            return FccPreexistingStatus.Missing;
         }
-        catch { }
-        return false;
+        catch { return FccPreexistingStatus.Error; }
+    }
+
+    // Чистая функция решения об удалении FCC.
+    // Вход: purgeFcc (флаг --purge-fcc), status (значение fcc_preexisting из манифеста).
+    // Выход: true = удалять FCC, false = не трогать FCC.
+    // Правила:
+    // 1. Удалять ТОЛЬКО если purgeFcc == true И status == False.
+    // 2. Во всех остальных случаях (нет флага, status=True, Missing, Error) — не удалять.
+    static bool ShouldRemoveFcc(bool purgeFcc, FccPreexistingStatus status)
+    {
+        return purgeFcc && status == FccPreexistingStatus.False;
     }
 
     static bool IsOurInstallDir(string dir)
