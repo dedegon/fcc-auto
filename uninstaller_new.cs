@@ -395,7 +395,7 @@ class UninstallLauncher
             string actualStr = actual ? "да" : "нет";
             string resultStr = passed ? "PASS" : "FAIL";
 
-            Console.WriteLine($"{i+1}  | {purgeStr,-8} | {statusStr,-10} | {expectedStr,-8} | {actualStr,-6} | {resultStr,-9} | {tc.Desc}");
+            Console.WriteLine(string.Format("{0}  | {1,-8} | {2,-10} | {3,-8} | {4,-6} | {5,-9} | {6}", i+1, purgeStr, statusStr, expectedStr, actualStr, resultStr, tc.Desc));
         }
 
         Console.WriteLine("---|----------|------------|----------|--------|-----------|--------------------------");
