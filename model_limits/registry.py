@@ -91,6 +91,30 @@ class LimitsRegistry:
             }
         return None
 
+    def _daily_status(self, ref: str, now: float) -> tuple[str | None, float | None, int | None, int | None]:
+        """
+        Возвращает статус дневного лимита для describe и filter_available.
+        Кортеж: (status_text, daily_reset_unix, daily_limit, daily_remaining)
+        status_text: "available" | "exhausted_future" | "exhausted_past" | "unknown" | None
+        """
+        entry = self.data.get(ref, {})
+        daily_remaining = entry.get("daily_remaining")
+        daily_reset_unix = entry.get("daily_reset_unix")
+        daily_limit = entry.get("daily_limit")
+
+        if daily_remaining is None:
+            return (None, daily_reset_unix, daily_limit, daily_remaining)
+
+        if daily_remaining > 0:
+            return ("available", daily_reset_unix, daily_limit, daily_remaining)
+
+        # daily_remaining <= 0
+        if daily_reset_unix is not None and daily_reset_unix > now:
+            return ("exhausted_future", daily_reset_unix, daily_limit, daily_remaining)
+
+        # reset в прошлом или неизвестен
+        return ("exhausted_past", daily_reset_unix, daily_limit, daily_remaining)
+
     def is_daily_available(self, ref: str, now: float | None = None) -> bool:
         """Возвращает True, если модель доступна по дневному лимиту.
         Правило:
@@ -101,19 +125,17 @@ class LimitsRegistry:
         """
         if now is None:
             now = time.time()
-        entry = self.data.get(ref, {})
-        daily_remaining = entry.get("daily_remaining")
-        daily_reset_unix = entry.get("daily_reset_unix")
+        status, _, _, _ = self._daily_status(ref, now)
+        # available или exhausted_past -> доступна
+        return status in ("available", "exhausted_past", None)
 
-        if daily_remaining is None:
-            return True
-        if daily_remaining > 0:
-            return True
-        # daily_remaining <= 0
-        if daily_reset_unix is not None and daily_reset_unix > now:
-            return False
-        # reset в прошлом или неизвестен — пробуем
-        return True
+    def filter_available(self, refs: list[str], now: float | None = None) -> list[str]:
+        """Фильтрует список рефов, оставляя только те, где is_daily_available == True.
+        Используется в claude_filter для отбора моделей при переключении.
+        """
+        if now is None:
+            now = time.time()
+        return [ref for ref in refs if self.is_daily_available(ref, now)]
 
     def observe(self, ref: str, headers) -> None:
         """Лимиты из заголовков обычного ответа (так отдаёт OpenRouter/NVIDIA)."""
@@ -198,8 +220,12 @@ class LimitsRegistry:
 
     def describe(self, ref: str) -> str:
         """Подпись для /model: [Nk/мин] если известен tpm_limit.
-        Если известен дневной остаток и is_daily_available=True, добавляет: [Nk/мин, осталось D/день].
-        Если reset уже прошёл или remaining <= 0, показывает «сброс суток прошёл» вместо «осталось 0/L»."""
+        Дневная часть по правилу:
+        - daily_remaining > 0: «осталось D/L в день»
+        - daily_remaining <= 0, reset в будущем: «осталось 0/L в день, сброс HH:MM UTC»
+        - daily_remaining <= 0, reset в прошлом или неизвестен: «сброс суток прошёл»
+        - daily_remaining неизвестен: без дневной части.
+        """
         entry = self.data.get(ref, {})
         now = time.time()
         if entry.get("blocked_until", 0) > now:
@@ -216,20 +242,35 @@ class LimitsRegistry:
         else:
             parts.append("лимит неизвестен")
 
-        # Daily limit display: show "осталось D/L" only if remaining > 0.
-        # If remaining <= 0 (whether reset passed or future), show "сброс суток прошёл".
-        if daily_limit is not None and daily_remaining is not None:
-            if daily_remaining > 0:
-                parts.append(f"осталось {daily_remaining}/{daily_limit} в день")
-            else:
-                parts.append("сброс суток прошёл")
-        elif daily_limit is not None:
-            parts.append(f"дневной лимит {daily_limit}")
-        elif daily_remaining is not None:
-            parts.append(f"осталось {daily_remaining} в день")
+        # Daily part logic using _daily_status
+        status, reset_unix, dlim, drem = self._daily_status(ref, now)
 
-        if daily_reset and daily_reset > now:
-            reset_str = time.strftime("%H:%M", time.gmtime(daily_reset))
-            parts.append(f"сброс {reset_str} UTC")
+        if status == "available":
+            # daily_remaining > 0
+            if dlim is not None and drem is not None:
+                parts.append(f"осталось {drem}/{dlim} в день")
+            elif dlim is not None:
+                parts.append(f"дневной лимит {dlim}")
+            elif drem is not None:
+                parts.append(f"осталось {drem} в день")
+
+        elif status == "exhausted_future":
+            # daily_remaining <= 0, reset в будущем
+            if dlim is not None and drem is not None:
+                parts.append(f"осталось {drem}/{dlim} в день")
+            elif dlim is not None:
+                parts.append(f"дневной лимит {dlim}")
+            elif drem is not None:
+                parts.append(f"осталось {drem} в день")
+            # Добавляем время сброса
+            if reset_unix is not None:
+                reset_str = time.strftime("%H:%M", time.gmtime(reset_unix))
+                parts.append(f"сброс {reset_str} UTC")
+
+        elif status == "exhausted_past":
+            # daily_remaining <= 0, reset в прошлом или неизвестен
+            parts.append("сброс суток прошёл")
+
+        # status == None (daily_remaining unknown) -> no daily part
 
         return f"{ref}  [{', '.join(parts)}]"

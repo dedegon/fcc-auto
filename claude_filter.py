@@ -279,11 +279,8 @@ class _Handler(BaseHTTPRequestHandler):
                             window = self.get_window(m)
                             if window is not None and window >= cfg.MIN_CONTEXT_TOKENS:
                                 filtered.append(m)
-                        # Filter by daily limit availability (exclude models where is_daily_available is False)
-                        daily_available = []
-                        for m in filtered:
-                            if self.limits.is_daily_available(m):
-                                daily_available.append(m)
+                        # Filter by daily limit availability using filter_available
+                        daily_available = self.limits.filter_available(filtered)
                         if daily_available:
                             # Prefer models with daily_remaining > 0
                             preferred = []
@@ -371,11 +368,8 @@ class _Handler(BaseHTTPRequestHandler):
                             window = self.get_window(m)
                             if window is not None and window >= cfg.MIN_CONTEXT_TOKENS:
                                 filtered.append(m)
-                        # Filter by daily limit availability (exclude models where is_daily_available is False)
-                        daily_available = []
-                        for m in filtered:
-                            if self.limits.is_daily_available(m):
-                                daily_available.append(m)
+                        # Filter by daily limit availability using filter_available
+                        daily_available = self.limits.filter_available(filtered)
                         if daily_available:
                             # Prefer models with daily_remaining > 0
                             preferred = []

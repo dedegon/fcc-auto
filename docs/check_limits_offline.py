@@ -20,6 +20,7 @@ def main():
     results = []
 
     # Test 1: Parse headers with Limit=50, Remaining=0, Reset in future (ms)
+    # Expect describe to show "осталось 0/50" and "сброс HH:MM UTC"
     def test1():
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             tmp_path = Path(f.name)
@@ -35,8 +36,8 @@ def main():
             lim, rem, rst = reg.get_daily_remaining("test/model1")
             ok = (lim == 50 and rem == 0 and rst is not None and abs(rst - reset_ms/1000) < 2)
             desc = reg.describe("test/model1")
-            # New behavior: remaining=0 shows "сброс суток прошёл" not "осталось 0/50"
-            ok = ok and ("сброс суток прошёл" in desc)
+            # New behavior: remaining=0, reset future -> "осталось 0/50 в день, сброс HH:MM UTC"
+            ok = ok and ("осталось 0/50" in desc) and ("сброс" in desc) and ("UTC" in desc)
             return ok
         finally:
             tmp_path.unlink(missing_ok=True)
@@ -166,6 +167,7 @@ def main():
     results.append(test_case("describe() format with tpm and daily", test7))
 
     # Test 8: is_daily_available False for remaining=0 and reset in future
+    # Also check filter_available excludes exhausted model
     def test8():
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             tmp_path = Path(f.name)
@@ -177,17 +179,20 @@ def main():
                 "x-ratelimit-remaining": "0",
                 "x-ratelimit-reset": str(reset_ms),
             }
-            reg.observe("test/model8", headers)
-            # is_daily_available should return False
-            available = reg.is_daily_available("test/model8")
-            # Also check that it would be excluded from filter switching
-            # (filter calls is_daily_available before adding to daily_available list)
-            return available is False
+            reg.observe("test/model8a", headers)
+            # Model without daily data
+            reg.observe("test/model8b", {"x-ratelimit-limit": "100"})
+            # is_daily_available should return False for exhausted model
+            available_a = reg.is_daily_available("test/model8a")
+            available_b = reg.is_daily_available("test/model8b")
+            # filter_available should only return model8b
+            filtered = reg.filter_available(["test/model8a", "test/model8b"])
+            return (available_a is False) and (available_b is True) and (filtered == ["test/model8b"])
         finally:
             tmp_path.unlink(missing_ok=True)
-    results.append(test_case("is_daily_available False: remaining=0 reset future", test8))
+    results.append(test_case("is_daily_available False + filter_available", test8))
 
-    # Test 9: is_daily_available True for remaining=0 and reset in past; describe without "осталось 0"
+    # Test 9: is_daily_available True for remaining=0 and reset in past; describe contains "сброс суток прошёл"
     def test9():
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             tmp_path = Path(f.name)
@@ -202,13 +207,61 @@ def main():
             reg.observe("test/model9", headers)
             # is_daily_available should return True (reset passed)
             available = reg.is_daily_available("test/model9")
-            # describe should NOT contain "осталось 0/50" but may contain "сброс суток прошёл"
+            # describe should contain "сброс суток прошёл"
             desc = reg.describe("test/model9")
-            no_remaining_text = "осталось 0/50" not in desc
-            return available is True and no_remaining_text
+            has_reset_passed = "сброс суток прошёл" in desc
+            return available is True and has_reset_passed
         finally:
             tmp_path.unlink(missing_ok=True)
-    results.append(test_case("is_daily_available True: remaining=0 reset past; describe ok", test9))
+    results.append(test_case("is_daily_available True: remaining=0 reset past; describe=сброс суток прошёл", test9))
+
+    # Test 10: remaining=0, reset in future: describe contains "сброс", "UTC", "осталось 0/50"
+    def test10():
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            reg = LimitsRegistry(tmp_path)
+            reset_ms = int((time.time() + 3600) * 1000)  # 1 hour future
+            headers = {
+                "x-ratelimit-limit": "50",
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-reset": str(reset_ms),
+            }
+            reg.observe("test/model10", headers)
+            desc = reg.describe("test/model10")
+            # Should contain "осталось 0/50", "сброс", "UTC"
+            return ("осталось 0/50" in desc) and ("сброс" in desc) and ("UTC" in desc)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    results.append(test_case("describe: remaining=0 reset future -> 0/50 + сброс UTC", test10))
+
+    # Test 11: filter_available with exhausted (reset future) and no-data models
+    def test11():
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            reg = LimitsRegistry(tmp_path)
+            reset_ms = int((time.time() + 3600) * 1000)  # 1 hour future
+            # Model A: exhausted, reset future
+            reg.observe("test/model11a", {
+                "x-ratelimit-limit": "50",
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-reset": str(reset_ms),
+            })
+            # Model B: no daily data
+            reg.observe("test/model11b", {"x-ratelimit-limit": "100"})
+            # Model C: has remaining > 0
+            reg.observe("test/model11c", {
+                "x-ratelimit-limit": "30",
+                "x-ratelimit-remaining": "15",
+                "x-ratelimit-reset": str(reset_ms),
+            })
+            # filter_available should return only B and C (not A)
+            filtered = reg.filter_available(["test/model11a", "test/model11b", "test/model11c"])
+            return filtered == ["test/model11b", "test/model11c"]
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    results.append(test_case("filter_available: excludes exhausted, keeps no-data and available", test11))
 
     # Summary
     passed = sum(results)
