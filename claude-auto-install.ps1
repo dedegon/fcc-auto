@@ -1,0 +1,584 @@
+﻿<#
+.SYNOPSIS
+    claude-auto installer logic called by Inno Setup.
+.DESCRIPTION
+    Installs claude-auto and optionally FCC (free-claude-code) via uv.
+    Writes installation manifest to track state for rollback/uninstall.
+    Uses dedicated uv tool environment for isolation.
+.PARAMETER InstallDir
+    Target directory for program files. Default: %LOCALAPPDATA%\claude-auto\app
+.PARAMETER DataDir
+    Directory for manifest and logs. Default: %LOCALAPPDATA%\claude-auto
+.PARAMETER InstallFcc
+    Switch: install FCC if not already present.
+.PARAMETER Silent
+    Switch: suppress console output, only write to log file.
+.PARAMETER ManifestPath
+    Path to installation manifest JSON. Default: $DataDir\install.json
+.PARAMETER FccVersionFile
+    Path to fcc.version file (x.y.z format). Default: fcc.version next to script.
+.PARAMETER SourceDir
+    Source directory with program files. Default: script directory.
+.PARAMETER LogPath
+    Path to log file. Default: $DataDir\install.log
+#>
+
+[CmdletBinding()]
+param(
+    [string]$InstallDir = "$env:LOCALAPPDATA\claude-auto\app",
+    [string]$DataDir = "$env:LOCALAPPDATA\claude-auto",
+    [switch]$InstallFcc,
+    [switch]$Silent,
+    [string]$ManifestPath = "$env:LOCALAPPDATA\claude-auto\install.json",
+    [string]$FccVersionFile,
+    [string]$SourceDir,
+    [string]$LogPath
+)
+
+# Initialize paths
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+if (-not $FccVersionFile) { $FccVersionFile = Join-Path $scriptDir "fcc.version" }
+if (-not $SourceDir) { $SourceDir = $scriptDir }
+if (-not $LogPath) { $LogPath = Join-Path $DataDir "install.log" }
+
+# Dedicated uv tool environment for isolation
+$UvToolDir = Join-Path $DataDir "uv-tools"
+$UvToolBinDir = Join-Path $DataDir "uv-tools\bin"
+$env:UV_TOOL_DIR = $UvToolDir
+$env:UV_TOOL_BIN_DIR = $UvToolBinDir
+
+# State tracking for rollback
+$script:fccPreexisting = $false
+$script:fccInstalledByUs = $false
+$script:fccInstalledThisRun = $false
+$script:installDirCreated = $false
+$script:claudeAutoInstalled = $false
+$script:claudeAutoInstalledThisRun = $false
+$script:claudeAutoPreexisting = $false
+$script:claudeAutoUpgradeFromOurPrevious = $false
+$script:fccUpgradeFromOurPrevious = $false
+$script:filesBackedUp = @{}
+
+# Logging functions
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "[$timestamp] [$Level] $Message"
+    $line | Out-File -FilePath $LogPath -Encoding UTF8 -Append
+    if (-not $Silent) { Write-Host $line }
+}
+
+function Write-ErrorLog {
+    param([string]$Message)
+    Write-Log $Message "ERROR"
+}
+
+# JSON helper for manifest (simple, no dependencies)
+function Write-Manifest {
+    param(
+        [string]$Status,
+        [string]$FccVersion = $null,
+        [string]$ManifestPathOverride = $null
+    )
+    $path = if ($ManifestPathOverride) { $ManifestPathOverride } else { $ManifestPath }
+    try {
+        $manifest = @{
+            repo_path                      = $InstallDir
+            install_dir                    = $InstallDir
+            data_dir                       = $DataDir
+            uv_tool_dir                    = $UvToolDir
+            uv_tool_bin_dir                = $UvToolBinDir
+            status                         = $Status
+            updated                        = (Get-Date).ToString("o")
+            fcc_preexisting                = $script:fccPreexisting
+            fcc_installed_by_us            = $script:fccInstalledByUs
+            fcc_upgrade_from_our_previous  = $script:fccUpgradeFromOurPrevious
+            claude_auto_preexisting        = $script:claudeAutoPreexisting
+            claude_auto_installed_by_us    = $script:claudeAutoInstalled
+            claude_auto_upgrade_from_our_previous = $script:claudeAutoUpgradeFromOurPrevious
+            version                        = "1.1.0"
+        }
+        if ($FccVersion) { $manifest.fcc_version = $FccVersion }
+        $json = $manifest | ConvertTo-Json -Depth 5
+        $json | Out-File -FilePath $path -Encoding UTF8
+        Write-Log "Manifest written: $Status"
+    }
+    catch {
+        Write-ErrorLog "Failed to write manifest: $($_.Exception.Message)"
+    }
+}
+
+function Read-FccVersion {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-ErrorLog "FCC version file not found: $Path"
+        return $null
+    }
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    $version = $content.Trim()
+    if ($version -notmatch '^\d+\.\d+\.\d+$') {
+        Write-ErrorLog ("Invalid FCC version format in {0}: '{1}' (expected x.y.z)" -f $Path, $version)
+        return $null
+    }
+    return $version
+}
+
+function Detect-Fcc {
+    # Check 1: file in %USERPROFILE%\.local\bin
+    $fccExe = Join-Path $env:USERPROFILE ".local\bin\fcc-server.exe"
+    if (Test-Path -LiteralPath $fccExe) {
+        $version = &(Get-Command -Name "cmd.exe" -CommandType Application) /c "$fccExe --version" 2>$null
+        if ($version) {
+            Write-Log "FCC detected via file: $fccExe (version: $version)"
+            return @{ State = "Installed"; Version = $version.Trim() }
+        }
+    }
+
+    # Check 2: Get-Command fcc-server
+    try {
+        $cmd = Get-Command "fcc-server" -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $version = & "fcc-server.exe" --version 2>$null
+            if ($version) {
+                Write-Log "FCC detected via Get-Command (version: $version)"
+                return @{ State = "Installed"; Version = $version.Trim() }
+            }
+        }
+    } catch { }
+
+    # Check 3: uv tool list (in dedicated environment)
+    try {
+        $output = & "uv" tool list 2>$null
+        if ($output -and $output -match "free-claude-code") {
+            $match = [regex]::Match($output, "free-claude-code\s+(\S+)")
+            if ($match.Success) {
+                $version = $match.Groups[1].Value
+                Write-Log "FCC detected via uv tool list (version: $version)"
+                return @{ State = "Installed"; Version = $version }
+            }
+        }
+    } catch { }
+
+    Write-Log "FCC not detected"
+    return @{ State = "NotInstalled"; Version = $null }
+}
+
+function Detect-ClaudeAuto {
+    # Check if claude-auto is already installed in our dedicated uv tool environment
+    try {
+        $output = & "uv" tool list 2>$null
+        if ($output -and $output -match "claude-auto") {
+            $match = [regex]::Match($output, "claude-auto\s+(\S+)")
+            if ($match.Success) {
+                $version = $match.Groups[1].Value
+                Write-Log "Pre-existing claude-auto detected via uv tool list (version: $version)"
+                return @{ State = "Installed"; Version = $version }
+            }
+        }
+    } catch { }
+
+    # Also check if claude-auto executable is in PATH
+    try {
+        $cmd = Get-Command "claude-auto" -ErrorAction SilentlyContinue
+        if ($cmd) {
+            Write-Log "Pre-existing claude-auto detected via Get-Command"
+            return @{ State = "Installed"; Version = "unknown" }
+        }
+    } catch { }
+
+    Write-Log "claude-auto not detected"
+    return @{ State = "NotInstalled"; Version = $null }
+}
+
+function Ensure-Uv {
+    if (Get-Command "uv" -ErrorAction SilentlyContinue) {
+        Write-Log "uv already available"
+        return $true
+    }
+    Write-Log "Installing uv from astral.sh"
+    try {
+        $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorLog "uv installation failed: $output"
+            return $false
+        }
+        # Refresh PATH for current process
+        $localBin = Join-Path $env:USERPROFILE ".local\bin"
+        $env:PATH = "$localBin;$env:PATH"
+        if (Get-Command "uv" -ErrorAction SilentlyContinue) {
+            Write-Log "uv installed successfully"
+            return $true
+        }
+        Write-ErrorLog "uv installed but not found in PATH"
+        return $false
+    }
+    catch {
+        Write-ErrorLog "Exception during uv install: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Install-Fcc {
+    param([string]$Version)
+    Write-Log "Installing FCC version $Version via uv (tool dir: $UvToolDir)"
+    try {
+        $output = & "uv" tool install "free-claude-code==$Version" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorLog "FCC installation failed: $output"
+            return $false
+        }
+        $script:fccInstalledByUs = $true
+        $script:fccInstalledThisRun = $true
+        Write-Log "FCC installed successfully"
+        return $true
+    }
+    catch {
+        Write-ErrorLog "Exception during FCC install: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Backup-ExistingFile {
+    param([string]$FilePath)
+    if (Test-Path -LiteralPath $FilePath) {
+        $backupPath = "$FilePath.backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
+        Copy-Item -LiteralPath $FilePath -Destination $backupPath -Force
+        $script:filesBackedUp[$FilePath] = $backupPath
+        Write-Log "Backed up existing file: $FilePath -> $backupPath"
+        return $true
+    }
+    return $false
+}
+
+function Copy-ProgramFiles {
+    Write-Log "Copying program files from $SourceDir to $InstallDir"
+    try {
+        if (-not (Test-Path -LiteralPath $InstallDir)) {
+            New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+            $script:installDirCreated = $true
+            Write-Log "Created InstallDir: $InstallDir"
+        }
+
+        $files = @(
+            "claude_auto.py",
+            "claude_filter.py",
+            "scanner.py",
+            "scanner_config.py",
+            "pyproject.toml",
+            "README.md"
+        )
+
+        foreach ($file in $files) {
+            $src = Join-Path $SourceDir $file
+            $dst = Join-Path $InstallDir $file
+            if (Test-Path -LiteralPath $src) {
+                # Backup existing file before overwriting
+                Backup-ExistingFile -FilePath $dst
+                Copy-Item -LiteralPath $src -Destination $dst -Force
+                Write-Log "Copied: $file"
+            }
+            else {
+                Write-Log "Source file not found (skipped): $file" "WARN"
+            }
+        }
+
+        $modelLimitsSrc = Join-Path $SourceDir "model_limits"
+        $modelLimitsDst = Join-Path $InstallDir "model_limits"
+        if (Test-Path -LiteralPath $modelLimitsSrc) {
+            # Backup existing model_limits directory
+            if (Test-Path -LiteralPath $modelLimitsDst) {
+                $backupPath = "$modelLimitsDst.backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
+                Copy-Item -LiteralPath $modelLimitsDst -Destination $backupPath -Recurse -Force
+                $script:filesBackedUp[$modelLimitsDst] = $backupPath
+                Write-Log "Backed up existing model_limits directory"
+            }
+            Copy-Item -LiteralPath $modelLimitsSrc -Destination $modelLimitsDst -Recurse -Force
+            Write-Log "Copied model_limits directory"
+        }
+
+        return $true
+    }
+    catch {
+        Write-ErrorLog "Failed to copy program files: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Restore-BackedUpFiles {
+    Write-Log "Restoring backed up files"
+    foreach ($original in $script:filesBackedUp.Keys) {
+        $backup = $script:filesBackedUp[$original]
+        if (Test-Path -LiteralPath $backup) {
+            try {
+                if (Test-Path -LiteralPath $original) {
+                    Remove-Item -LiteralPath $original -Recurse -Force -ErrorAction Stop
+                }
+                Copy-Item -LiteralPath $backup -Destination $original -Recurse -Force
+                Remove-Item -LiteralPath $backup -Force
+                Write-Log "Restored: $original"
+            }
+            catch {
+                Write-ErrorLog ("Failed to restore {0} from {1}: {2}" -f $original, $backup, $_.Exception.Message)
+            }
+        }
+    }
+}
+
+function Install-ClaudeAuto {
+    Write-Log "Installing claude-auto from $InstallDir via uv (tool dir: $UvToolDir)"
+    try {
+        $output = & "uv" tool install --force $InstallDir 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorLog "claude-auto installation failed: $output"
+            return $false
+        }
+        $script:claudeAutoInstalled = $true
+        $script:claudeAutoInstalledThisRun = $true
+        Write-Log "claude-auto installed successfully"
+        return $true
+    }
+    catch {
+        Write-ErrorLog "Exception during claude-auto install: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Verify-Installation {
+    Write-Log "Verifying installation"
+    try {
+        $output = & "claude-auto" --help 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorLog "claude-auto --help failed: $output"
+            return $false
+        }
+        Write-Log "claude-auto --help OK"
+
+        if ($script:fccPreexisting -or $script:fccInstalledByUs) {
+            $output = & "fcc-server.exe" --version 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Log "fcc-server --version check failed (non-fatal): $output" "WARN"
+            }
+            else {
+                Write-Log "fcc-server --version OK: $output"
+            }
+        }
+
+        return $true
+    }
+    catch {
+        Write-ErrorLog "Exception during verification: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-Rollback {
+    Write-Log "Starting rollback"
+    Write-Manifest -Status "failed"
+
+    # Uninstall claude-auto ONLY if we installed it in THIS run
+    if ($script:claudeAutoInstalledThisRun) {
+        try {
+            $output = & "uv" tool uninstall "claude-auto" 2>&1
+            $result = if ($LASTEXITCODE -eq 0) { "OK" } else { "Failed: " + $output }
+            Write-Log ("Rollback: uv tool uninstall claude-auto - {0}" -f $result)
+        }
+        catch {
+            Write-ErrorLog "Rollback error uninstalling claude-auto: $($_.Exception.Message)"
+        }
+    }
+    elseif ($script:claudeAutoPreexisting) {
+        Write-Log "Rollback: preserving pre-existing claude-auto installation"
+    }
+    elseif ($script:claudeAutoUpgradeFromOurPrevious) {
+        Write-Log "Rollback: preserving our previous claude-auto installation (upgrade failed)"
+    }
+
+    # Uninstall FCC ONLY if we installed it in THIS run
+    if ($script:fccInstalledThisRun) {
+        try {
+            $output = & "uv" tool uninstall "free-claude-code" 2>&1
+            $result = if ($LASTEXITCODE -eq 0) { "OK" } else { "Failed: " + $output }
+            Write-Log ("Rollback: uv tool uninstall free-claude-code - {0}" -f $result)
+        }
+        catch {
+            Write-ErrorLog "Rollback error uninstalling FCC: $($_.Exception.Message)"
+        }
+    }
+    elseif ($script:fccPreexisting) {
+        Write-Log "Rollback: preserving pre-existing FCC installation"
+    }
+    elseif ($script:fccUpgradeFromOurPrevious) {
+        Write-Log "Rollback: preserving our previous FCC installation (upgrade failed)"
+    }
+
+    # Remove InstallDir if we created it
+    if ($script:installDirCreated -and (Test-Path -LiteralPath $InstallDir)) {
+        try {
+            Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction Stop
+            Write-Log "Rollback: removed InstallDir"
+        }
+        catch {
+            Write-ErrorLog "Rollback error removing InstallDir: $($_.Exception.Message)"
+        }
+    }
+    else {
+        # Restore backed up files if we didn't create the directory
+        Restore-BackedUpFiles
+    }
+
+    Write-Log "Rollback completed"
+}
+
+# ========== MAIN ==========
+function Main {
+    try {
+        Write-Log "=== claude-auto installation started ==="
+        Write-Log "InstallDir: $InstallDir"
+        Write-Log "DataDir: $DataDir"
+        Write-Log "UvToolDir: $UvToolDir"
+        Write-Log "InstallFcc: $InstallFcc"
+        Write-Log "Silent: $Silent"
+
+        # Step 0: Read existing manifest to detect upgrade from our previous install
+        $existingManifest = $null
+        if (Test-Path -LiteralPath $ManifestPath) {
+            try {
+                $json = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8
+                $existingManifest = $json | ConvertFrom-Json
+                Write-Log "Existing manifest found (status: $($existingManifest.status), version: $($existingManifest.version))"
+            }
+            catch {
+                Write-Log "Existing manifest found but failed to parse: $($_.Exception.Message)" "WARN"
+            }
+        }
+
+        # Determine if this is an upgrade of OUR previous installation
+        $isUpgradeFromOurInstall = $false
+        if ($existingManifest -and $existingManifest.status -eq "installed" -and $existingManifest.claude_auto_installed_by_us -eq $true) {
+            $isUpgradeFromOurInstall = $true
+            $script:claudeAutoUpgradeFromOurPrevious = $true
+            Write-Log "Detected upgrade from our previous installation (version: $($existingManifest.version))"
+        }
+
+        # Determine if FCC was installed by us in previous run
+        $fccWasInstalledByUs = $false
+        if ($existingManifest -and $existingManifest.status -eq "installed" -and $existingManifest.fcc_installed_by_us -eq $true) {
+            $fccWasInstalledByUs = $true
+            $script:fccUpgradeFromOurPrevious = $true
+            Write-Log "FCC was installed by us in previous run"
+        }
+
+        # Step 1: Read FCC version
+        $fccVersion = Read-FccVersion -Path $FccVersionFile
+        if (-not $fccVersion) {
+            Write-ErrorLog "Exiting due to version error (no changes made)"
+            exit 1
+        }
+        Write-Log "FCC version: $fccVersion"
+
+        # Step 2: Write manifest in_progress (with upgrade flags)
+        Write-Manifest -Status "in_progress" -FccVersion $fccVersion
+
+        # Step 3: Detect FCC
+        $fccResult = Detect-Fcc
+        $fccDetected = ($fccResult.State -eq "Installed")
+
+        # If upgrade from our previous install and we installed FCC before, it's NOT foreign pre-existing
+        if ($fccDetected -and $script:fccUpgradeFromOurPrevious) {
+            $script:fccPreexisting = $false
+            # fccInstalledByUs stays false until this run installs it
+            Write-Log "FCC detected - upgrade from our previous installation (version: $($fccResult.Version))"
+        }
+        elseif ($fccDetected) {
+            $script:fccPreexisting = $true
+            $script:fccInstalledByUs = $false
+            Write-Log "FCC pre-existing (version: $($fccResult.Version)), skipping install"
+        }
+        else {
+            Write-Log "FCC not found"
+        }
+        Write-Manifest -Status "in_progress" -FccVersion $fccVersion  # Update fcc_preexisting, fcc_installed_by_us
+
+        # Step 3b: Detect pre-existing claude-auto
+        $claudeAutoResult = Detect-ClaudeAuto
+        $claudeAutoDetected = ($claudeAutoResult.State -eq "Installed")
+
+        # If upgrade from our previous install, it's NOT foreign pre-existing
+        if ($claudeAutoDetected -and $script:claudeAutoUpgradeFromOurPrevious) {
+            $script:claudeAutoPreexisting = $false
+            # claudeAutoInstalled stays false until this run installs it
+            Write-Log "claude-auto detected - upgrade from our previous installation (version: $($claudeAutoResult.Version))"
+        }
+        elseif ($claudeAutoDetected) {
+            $script:claudeAutoPreexisting = $true
+            $script:claudeAutoInstalled = $false
+            Write-Log "Pre-existing claude-auto detected (version: $($claudeAutoResult.Version)), will preserve"
+        }
+        else {
+            Write-Log "No pre-existing claude-auto found"
+        }
+        Write-Manifest -Status "in_progress" -FccVersion $fccVersion  # Update claude_auto_preexisting, claude_auto_installed_by_us
+
+        # Step 4: Ensure uv
+        if (-not (Ensure-Uv)) {
+            Write-ErrorLog "uv not available, rolling back"
+            Invoke-Rollback
+            exit 1
+        }
+
+        # Step 5: Install FCC if needed
+        if (-not $script:fccPreexisting -and $InstallFcc) {
+            if (-not (Install-Fcc -Version $fccVersion)) {
+                Write-ErrorLog "FCC installation failed, rolling back"
+                Invoke-Rollback
+                exit 1
+            }
+            Write-Manifest -Status "in_progress" -FccVersion $fccVersion  # Update fcc_installed_by_us
+        }
+        elseif ($script:fccPreexisting -and $InstallFcc) {
+            Write-Log "FCC already installed, -InstallFcc ignored"
+        }
+
+        # Step 6: Copy program files
+        if (-not (Copy-ProgramFiles)) {
+            Write-ErrorLog "File copy failed, rolling back"
+            Invoke-Rollback
+            exit 1
+        }
+
+        # Step 7: Install claude-auto (only if not pre-existing)
+        if (-not $script:claudeAutoPreexisting) {
+            if (-not (Install-ClaudeAuto)) {
+                Write-ErrorLog "claude-auto installation failed, rolling back"
+                Invoke-Rollback
+                exit 1
+            }
+        }
+        else {
+            Write-Log "Skipping claude-auto installation (pre-existing)"
+        }
+
+        # Step 8: Verify
+        if (-not (Verify-Installation)) {
+            Write-ErrorLog "Verification failed, rolling back"
+            Invoke-Rollback
+            exit 1
+        }
+
+        # Step 9: Final manifest
+        Write-Manifest -Status "installed" -FccVersion $fccVersion
+        Write-Log "=== Installation completed successfully ==="
+        exit 0
+    }
+    catch {
+        Write-ErrorLog "Unexpected error: $($_.Exception.Message)"
+        Invoke-Rollback
+        exit 1
+    }
+}
+
+# Only run Main when executed directly, not when dot-sourced for testing
+# InvocationName is '.' when dot-sourced, script path or '&' when run directly
+if ($MyInvocation.InvocationName -ne '.') {
+    Main
+}

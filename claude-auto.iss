@@ -1,0 +1,354 @@
+; claude-auto Inno Setup Script
+; Variant B: User-level install, HKCU registry, HKCU\Environment PATH, asInvoker
+; Requires Inno Setup 6.2+
+
+#define MyAppName "claude-auto"
+#define MyAppVersion "1.1.0"
+#define MyAppPublisher "claude-auto"
+#define MyAppURL "https://github.com/claude-auto/claude-auto"
+#define MyAppExeName "claude-auto.exe"
+
+; Build output directory
+#define BuildOutputDir "dist"
+
+[Setup]
+AppId={{C3F8E9B2-7A4D-4F1E-9B6A-1D2E3F4A5B6C}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={localappdata}\{#MyAppName}\app
+DefaultGroupName={#MyAppName}
+DisableProgramGroupPage=yes
+LicenseFile=
+InfoBeforeFile=
+InfoAfterFile=
+OutputDir={#BuildOutputDir}
+OutputBaseFilename=install-claude-auto-V{#MyAppVersion}
+SetupIconFile=
+Compression=lzma
+SolidCompression=yes
+WizardStyle=modern
+PrivilegesRequired=lowest
+ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64
+MinVersion=0,10.0.19041
+DisableDirPage=no
+UsePreviousAppDir=no
+UsePreviousGroup=no
+UsePreviousLanguage=no
+UsePreviousTasks=no
+AllowNoIcons=yes
+WindowResizable=no
+WindowShowCaption=yes
+WindowStartMaximized=no
+CreateAppDir=yes
+AlwaysShowDirOnReadyPage=no
+AlwaysShowGroupOnReadyPage=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "installfcc"; Description: "Install Free Claude Code (FCC) via uv"; GroupDescription: "Optional components"; Flags: checked
+Name: "uninstallfcc"; Description: "Remove Free Claude Code (FCC) on uninstall"; GroupDescription: "Uninstall options"; Flags: unchecked
+
+[Files]
+; Python source files
+Source: "claude_auto.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "claude_filter.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "scanner.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "scanner_config.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "pyproject.toml"; DestDir: "{app}"; Flags: ignoreversion
+Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
+
+; model_limits package
+Source: "model_limits\__init__.py"; DestDir: "{app}\model_limits"; Flags: ignoreversion
+Source: "model_limits\registry.py"; DestDir: "{app}\model_limits"; Flags: ignoreversion
+
+; FCC version file (embedded in installer)
+Source: "dist\fcc.version"; DestDir: "{app}"; Flags: ignoreversion
+
+; PowerShell installer and uninstaller scripts
+Source: "claude-auto-install.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "claude-auto-uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{localappdata}\{#MyAppName}\uv-tools\bin\claude-auto.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto"; IconFilename: "{app}\claude_auto.py"
+Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; WorkingDir: "{app}"; Comment: "Uninstall claude-auto"
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{localappdata}\{#MyAppName}\uv-tools\bin\claude-auto.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto"; Tasks: desktopicon; IconFilename: "{app}\claude_auto.py"
+
+[Run]
+; Run the PowerShell installer after file copy
+; Parameters are built in PrepareToInstall and passed via {param:InstallParams}
+Filename: "powershell.exe"; Parameters: "{param:InstallParams}"; StatusMsg: "Installing claude-auto and dependencies..."; Flags: runhidden waituntilterminated shellexec
+
+[UninstallRun]
+; Run the PowerShell uninstaller before file removal
+Filename: "powershell.exe"; Parameters: "{param:UninstallParams}"; Flags: runhidden waituntilterminated shellexec
+
+[Code]
+var
+  FCCDetected: Boolean;
+  FCCVersionStr: String;
+  FCCInstallPath: String;
+  ClaudeAutoDetected: Boolean;
+  ClaudeAutoVersionStr: String;
+  IsUpgradeFromOurInstall: Boolean;
+  FCCWasInstalledByUs: Boolean;
+
+function InitializeSetup(): Boolean;
+begin
+  // Detect existing FCC installation
+  FCCDetected := False;
+  FCCVersionStr := '';
+  FCCInstallPath := '';
+
+  // Check 1: file in %USERPROFILE%\.local\bin
+  FCCInstallPath := ExpandConstant('{userprofile}\.local\bin\fcc-server.exe');
+  if FileExists(FCCInstallPath) then begin
+    FCCDetected := True;
+    FCCVersionStr := GetFCCVersionFromExe(FCCInstallPath);
+  end;
+
+  // Check 2: uv tool list (if uv is available)
+  if not FCCDetected then begin
+    FCCDetected := CheckFCCViaUvToolList(FCCVersionStr);
+  end;
+
+  // Detect existing claude-auto installation
+  ClaudeAutoDetected := False;
+  ClaudeAutoVersionStr := '';
+
+  // Check uv tool list for claude-auto
+  ClaudeAutoDetected := CheckClaudeAutoViaUvToolList(ClaudeAutoVersionStr);
+
+  // Check if this is an upgrade from our previous installation
+  IsUpgradeFromOurInstall := False;
+  FCCWasInstalledByUs := False;
+
+  if FileExists(ExpandConstant('{localappdata}\{#MyAppName}\install.json')) then begin
+    IsUpgradeFromOurInstall := CheckManifestForOurInstall;
+    FCCWasInstalledByUs := CheckManifestForFCCInstalledByUs;
+  end;
+
+  Result := True;
+end;
+
+function GetFCCVersionFromExe(ExePath: String): String;
+var
+  ResultCode: Integer;
+  VersionOutput: String;
+begin
+  Result := '';
+  if Exec(ExePath, '--version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
+    // Note: Inno Setup can't easily capture stdout from Exec
+    // We'll rely on uv tool list for version
+  end;
+end;
+
+function CheckFCCViaUvToolList(var Version: String): Boolean;
+var
+  ResultCode: Integer;
+  UvPath: String;
+begin
+  Result := False;
+  Version := '';
+
+  // Check if uv is in PATH
+  UvPath := ExpandConstant('{userprofile}\.local\bin\uv.exe');
+  if not FileExists(UvPath) then begin
+    UvPath := 'uv';
+  end;
+
+  // We can't easily capture output in Inno Setup, so we'll let the PS installer handle detection
+  // This function just returns False; the PS installer will do the real detection
+end;
+
+function CheckClaudeAutoViaUvToolList(var Version: String): Boolean;
+var
+  ResultCode: Integer;
+  UvPath: String;
+begin
+  Result := False;
+  Version := '';
+  // Same as above - let PS installer handle real detection
+end;
+
+function CheckManifestForOurInstall(): Boolean;
+var
+  ManifestPath: String;
+  JsonContent: String;
+begin
+  Result := False;
+  ManifestPath := ExpandConstant('{localappdata}\{#MyAppName}\install.json');
+  if FileExists(ManifestPath) then begin
+    // We can't easily parse JSON in Inno Setup Pascal Script
+    // The PS installer will do the real manifest parsing
+    // This is just a hint for UI
+    Result := True; // Assume it might be ours, PS will verify
+  end;
+end;
+
+function CheckManifestForFCCInstalledByUs(): Boolean;
+begin
+  Result := False;
+  // PS installer will do the real check
+end;
+
+procedure InitializeWizard();
+var
+  FCCLabel: TLabel;
+  FCCStatusLabel: TLabel;
+  ClaudeAutoLabel: TLabel;
+  ClaudeAutoStatusLabel: TLabel;
+  UpgradeLabel: TLabel;
+begin
+  // Add custom labels to show detection status on the welcome page
+  // This runs after the welcome page is created
+
+  // We'll add labels to the wpReady page instead (after directory selection)
+  // For now, just log detection results
+  Log('FCC Detected: ' + BoolToStr(FCCDetected, True));
+  if FCCDetected then Log('FCC Version: ' + FCCVersionStr);
+  Log('claude-auto Detected: ' + BoolToStr(ClaudeAutoDetected, True));
+  if ClaudeAutoDetected then Log('claude-auto Version: ' + ClaudeAutoVersionStr);
+  Log('Is Upgrade From Our Install: ' + BoolToStr(IsUpgradeFromOurInstall, True));
+  Log('FCC Was Installed By Us: ' + BoolToStr(FCCWasInstalledByUs, True));
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  // On the Ready page (wpReady), update task checkboxes based on detection
+  if CurPageID = wpReady then begin
+    // Disable "Install FCC" if FCC is already detected and not our upgrade
+    if FCCDetected and not FCCWasInstalledByUs then begin
+      WizardForm.TasksList.Checked[1] := False; // installfcc task (index 1)
+      WizardForm.TasksList.ItemEnabled[1] := False;
+    end;
+
+    // Enable "Uninstall FCC" checkbox only if FCC was installed by us
+    if FCCWasInstalledByUs then begin
+      WizardForm.TasksList.ItemEnabled[2] := True; // uninstallfcc task (index 2)
+    end else begin
+      WizardForm.TasksList.ItemEnabled[2] := False;
+    end;
+
+    // Show upgrade info
+    if IsUpgradeFromOurInstall then begin
+      // Could add a label here showing upgrade info
+    end;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+
+  // Validate on Ready page
+  if CurPageID = wpReady then begin
+    // If this is an upgrade, confirm
+    if IsUpgradeFromOurInstall then begin
+      if not MsgBox('An existing claude-auto installation was detected. This will upgrade it. Continue?', mbConfirmation, MB_YESNO) = IDYES then begin
+        Result := False;
+      end;
+    end;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): Boolean;
+var
+  InstallParams: String;
+  UninstallParams: String;
+begin
+  // Build install parameters
+  InstallParams := '-NoProfile -ExecutionPolicy Bypass -File "{app}\claude-auto-install.ps1"';
+  InstallParams := InstallParams + ' -InstallDir "{localappdata}\{#MyAppName}\app"';
+  InstallParams := InstallParams + ' -DataDir "{localappdata}\{#MyAppName}"';
+  InstallParams := InstallParams + ' -FccVersionFile "{app}\fcc.version"';
+  InstallParams := InstallParams + ' -SourceDir "{app}"';
+
+  if IsTaskSelected('installfcc') then
+    InstallParams := InstallParams + ' -InstallFcc';
+
+  if WizardSilent then
+    InstallParams := InstallParams + ' -Silent';
+
+  // Store for [Run] section via {param:InstallParams}
+  SetSetupSetting('InstallParams', InstallParams);
+
+  // Build uninstall parameters
+  UninstallParams := '-NoProfile -ExecutionPolicy Bypass -File "{app}\claude-auto-uninstall.ps1"';
+  UninstallParams := UninstallParams + ' -ManifestPath "{localappdata}\{#MyAppName}\install.json"';
+
+  if IsTaskSelected('uninstallfcc') then
+    UninstallParams := UninstallParams + ' -DeleteFcc';
+
+  // Always use -Force for uninstall (non-interactive)
+  UninstallParams := UninstallParams + ' -Force';
+
+  if WizardSilent then
+    UninstallParams := UninstallParams + ' -Silent';
+
+  // Store for [UninstallRun] section via {param:UninstallParams}
+  SetSetupSetting('UninstallParams', UninstallParams);
+
+  Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    // Installation completed successfully
+    Log('Installation completed');
+  end
+  else if CurStep = ssUninstall then begin
+    // Uninstall started
+    Log('Uninstall started');
+  end;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+
+  // Skip license page (none defined)
+  if PageID = wpLicense then Result := True;
+
+  // Skip info pages (none defined)
+  if PageID = wpInfoBefore then Result := True;
+  if PageID = wpInfoAfter then Result := True;
+
+  // Skip user info page
+  if PageID = wpUserInfo then Result := True;
+end;
+
+procedure DeinitializeSetup();
+begin
+  // Cleanup if needed
+end;
+
+[CustomMessages]
+english.FCCDetected=Free Claude Code (FCC) already installed
+english.FCCNotDetected=Free Claude Code (FCC) not found
+english.ClaudeAutoDetected=claude-auto already installed
+english.ClaudeAutoNotDetected=claude-auto not found
+english.UpgradeDetected=Upgrade from previous claude-auto installation detected
+english.FCCInstalledByUs=FCC was installed by this application
+english.FCCNotInstalledByUs=FCC was installed externally (will be preserved)
+
+[UninstallDelete]
+; Remove only Inno Setup-managed files (app directory with Python sources)
+; The PS uninstaller handles uv-tools, manifest, logs, and PATH/registry
+Type: filesandordirs; Name: "{app}"
+
+[UninstallRegistry]
+; Inno Setup manages its own uninstall registry entry in HKCU
+; The PS uninstaller reads this for reference but doesn't delete it
+
+[Registry]
+; Inno Setup creates its own uninstall key in HKCU
+; We don't need additional registry entries
