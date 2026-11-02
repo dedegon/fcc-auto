@@ -1,9 +1,9 @@
-; claude-auto Inno Setup Script
+﻿; claude-auto Inno Setup Script
 ; Variant B: User-level install, HKCU registry, HKCU\Environment PATH, asInvoker
 ; Requires Inno Setup 6.2+
 
 #define MyAppName "claude-auto"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.0.0"
 #define MyAppPublisher "claude-auto"
 #define MyAppURL "https://github.com/claude-auto/claude-auto"
 #define MyAppExeName "claude-auto.exe"
@@ -352,3 +352,5 @@ Type: filesandordirs; Name: "{app}"
 [Registry]
 ; Inno Setup creates its own uninstall key in HKCU
 ; We don't need additional registry entries
+
+

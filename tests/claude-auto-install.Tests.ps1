@@ -2,7 +2,9 @@
 
 BeforeAll {
     # Dot-source the installer for testing
-    . "C:\gags\dev\claude-auto-install.ps1"
+    . "C:\gags\claude-auto\claude-auto-install.ps1"
+
+    $LogPath = Join-Path $TestDrive 'install.log'
 
     # Define ShouldRemoveFcc in the same scope as tests
     function global:ShouldRemoveFcc {
@@ -246,7 +248,7 @@ Describe "claude-auto-install.ps1" {
 
     Context "Parameter handling - Silent mode" {
         BeforeEach {
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
             $DataDir = $TestDrive
             $InstallDir = Join-Path $TestDrive "app"
             $script:fccPreexisting = $false
@@ -271,7 +273,7 @@ Describe "claude-auto-install.ps1" {
         It "Suppresses console output when -Silent is used" {
             $Silent = $true
             Write-Log "test message"
-            $logContent = Get-Content $LogPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            $logContent = Get-Content $global:LogPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             $logContent | Should -Match "test message"
         }
     }
@@ -279,7 +281,7 @@ Describe "claude-auto-install.ps1" {
     Context "Backup and restore" {
         BeforeEach {
             $script:filesBackedUp = @{}
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
         }
 
         It "Backup-ExistingFile creates backup with timestamp" {
@@ -371,7 +373,7 @@ Describe "claude-auto-install.ps1" {
         BeforeEach {
             $InstallDir = Join-Path $TestDrive "app"
             $SourceDir = Join-Path $TestDrive "src"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
             $script:installDirCreated = $false
             $script:filesBackedUp = @{}
 
@@ -417,7 +419,7 @@ Describe "claude-auto-install.ps1" {
             $InstallDir = Join-Path $TestDrive "app"
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
 
             # Create a fake existing manifest with our previous installation
             $existingManifest = @{
@@ -511,7 +513,7 @@ Describe "claude-auto-install.ps1" {
             $InstallDir = Join-Path $TestDrive "app"
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
         }
 
         It "Detects foreign pre-existing FCC (no manifest, but Detect-Fcc finds it)" {
@@ -578,7 +580,7 @@ Describe "claude-auto-install.ps1" {
             $InstallDir = Join-Path $TestDrive "app"
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
         }
 
         It "Treats corrupt manifest as unknown -> preserves everything" {
@@ -641,7 +643,7 @@ Describe "claude-auto-install.ps1" {
             $InstallDir = Join-Path $TestDrive "app"
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
 
             # Simulate first install completed
             $manifest = @{
@@ -711,7 +713,7 @@ Describe "claude-auto-install.ps1" {
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $UvToolBinDir = Join-Path $UvToolDir "bin"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
         }
 
         It "Manifest includes uv_tool_bin_dir field" {
@@ -760,7 +762,7 @@ Describe "claude-auto-install.ps1" {
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $UvToolBinDir = Join-Path $UvToolDir "bin"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
 
             # Create manifest with app-owned subdirs
             $manifest = @{
@@ -862,7 +864,7 @@ Describe "claude-auto-install.ps1" {
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $UvToolBinDir = Join-Path $UvToolDir "bin"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
 
             # Create valid pyproject.toml for install_dir
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -1027,7 +1029,7 @@ Describe "claude-auto-install.ps1" {
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $UvToolBinDir = Join-Path $UvToolDir "bin"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
 
             # Simulate existing manifest from previous successful install
             $existingManifest = @{
@@ -1135,7 +1137,7 @@ Describe "claude-auto-install.ps1" {
             $UvToolDir = Join-Path $TestDrive "uv-tools"
             $UvToolBinDir = Join-Path $UvToolDir "bin"
             $ManifestPath = Join-Path $TestDrive "install.json"
-            $LogPath = Join-Path $TestDrive "install.log"
+            $global:LogPath = Join-Path $TestDrive "install.log"
         }
 
         It "Inno Setup owns application payload files (simulated)" {
@@ -1190,3 +1192,7 @@ Describe "claude-auto-install.ps1" {
         }
     }
 }
+
+
+
+

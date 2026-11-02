@@ -1,4 +1,4 @@
-# Test runner for claude-auto-install.ps1 Pester tests
+﻿# Test runner for claude-auto-install.ps1 Pester tests
 # Does NOT modify system Pester modules. Checks for compatible version explicitly.
 
 $WarningPreference = "SilentlyContinue"
@@ -27,7 +27,7 @@ $WarningPreference = "Continue"
 
 # Dot-source the script to make functions available BEFORE Invoke-Pester
 # (Pester 6 runs tests in a child scope)
-$scriptPath = "C:\gags\dev\claude-auto-install.ps1"
+$scriptPath = "C:\gags\claude-auto\claude-auto-install.ps1"
 if (-not (Test-Path -LiteralPath $scriptPath)) {
     Write-Error "Installer script not found: $scriptPath"
     exit 1
@@ -36,7 +36,7 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
 . $scriptPath
 
 # Run tests
-$testPath = "C:\gags\dev\tests\claude-auto-install.Tests.ps1"
+$testPath = "C:\gags\claude-auto\tests\claude-auto-install.Tests.ps1"
 if (-not (Test-Path -LiteralPath $testPath)) {
     Write-Error "Test file not found: $testPath"
     exit 1
@@ -54,3 +54,4 @@ if ($res.FailedCount -gt 0) {
 }
 
 exit 0
+
