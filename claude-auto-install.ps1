@@ -240,11 +240,32 @@ function Ensure-Uv {
 function Install-Fcc {
     param([string]$Version)
     Write-Log "Installing FCC version $Version via uv (tool dir: $UvToolDir)"
-    Write-Log "Ensuring Python 3.14.10 via uv"
-    $pyOut = & "uv" python install 3.14.10 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-ErrorLog "uv python install 3.14.10 failed: $pyOut"; return $false }
+
+    $pyPath = $null
+
+    # a) Check CLAUDE_AUTO_PYTHON env var
+    if ($env:CLAUDE_AUTO_PYTHON -and (Test-Path -LiteralPath $env:CLAUDE_AUTO_PYTHON)) {
+        $pyPath = $env:CLAUDE_AUTO_PYTHON
+        Write-Log "Using Python from CLAUDE_AUTO_PYTHON: $pyPath"
+    }
+    else {
+        # b) Try uv python find 3.14.10
+        $found = & "uv" python find 3.14.10 2>$null
+        if ($LASTEXITCODE -eq 0 -and $found -and (Test-Path -LiteralPath $found.Trim())) {
+            $pyPath = $found.Trim()
+            Write-Log "Found existing Python 3.14.10 via uv python find: $pyPath"
+        }
+    }
+
+    if (-not $pyPath) {
+        Write-Log "Python 3.14.10 not found; FCC skipped (install claude-auto only)"
+        $script:fccInstalledByUs = $false
+        return $true
+    }
+
+    # c) Install FCC using found Python
     try {
-        $output = & "uv" tool install --python 3.14.10 "free-claude-code==$Version" 2>&1
+        $output = & "uv" tool install --python $pyPath "free-claude-code==$Version" 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "FCC installation failed: $output"
             return $false
@@ -451,6 +472,37 @@ function Invoke-Rollback {
     Write-Log "Rollback completed"
 }
 
+function Add-UvBinToUserPath {
+    param([string]$BinDir)
+
+    if (-not (Test-Path -LiteralPath $BinDir)) {
+        throw "BinDir does not exist: $BinDir"
+    }
+    $exePath = Join-Path $BinDir "claude-auto.exe"
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        throw "claude-auto.exe not found in BinDir: $BinDir"
+    }
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath) { $userPath = "" }
+
+    $paths = $userPath -split ';' | Where-Object { $_ -ne '' }
+    $normalizedBinDir = $BinDir.TrimEnd('\')
+    $found = $paths | Where-Object { $_.TrimEnd('\') -eq $normalizedBinDir }
+
+    if ($found) {
+        Write-Log "PATH already contains uv tool bin dir: $BinDir"
+    }
+    else {
+        $newPath = if ($userPath -and $userPath -notmatch ';$') { $userPath + ';' + $BinDir } elseif ($userPath) { $userPath + $BinDir } else { $BinDir }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Write-Log "Added uv tool bin dir to user PATH: $BinDir"
+    }
+
+    # Update current process PATH
+    $env:Path = $env:Path + ";" + $BinDir
+}
+
 # ========== MAIN ==========
 function Main {
     try {
@@ -587,7 +639,10 @@ function Main {
             exit 1
         }
 
-        # Step 9: Final manifest
+        # Step 9: Add uv tool bin dir to user PATH
+        Add-UvBinToUserPath -BinDir $UvToolBinDir
+
+        # Step 10: Final manifest
         Write-Manifest -Status "installed" -FccVersion $fccVersion
         Write-Log "=== Installation completed successfully ==="
         exit 0
