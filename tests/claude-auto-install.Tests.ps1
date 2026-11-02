@@ -2,7 +2,7 @@
 
 BeforeAll {
     # Dot-source the installer for testing
-    . "C:\gags\claude-auto\claude-auto-install.ps1"
+    . (Join-Path $PSScriptRoot '..\claude-auto-install.ps1')
 
     $LogPath = Join-Path $TestDrive 'install.log'
 
@@ -1192,6 +1192,7 @@ Describe "claude-auto-install.ps1" {
         }
     }
 }
+
 
 
 
