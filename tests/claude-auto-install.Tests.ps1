@@ -1197,3 +1197,4 @@ Describe "claude-auto-install.ps1" {
 
 
 
+
