@@ -392,7 +392,12 @@ function Install-ClaudeAuto {
 function Verify-Installation {
     Write-Log "Verifying installation"
     try {
-        $output = & "claude-auto" --help 2>&1
+        $claudeExe = Join-Path $UvToolBinDir "claude-auto.exe"
+        if (-not (Test-Path -LiteralPath $claudeExe)) {
+            Write-ErrorLog "claude-auto.exe not found: $claudeExe"
+            return $false
+        }
+        $output = & $claudeExe --help 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "claude-auto --help failed: $output"
             return $false
