@@ -191,6 +191,7 @@ function Detect-ClaudeAuto {
 }
 
 function Ensure-Uv {
+    $ProgressPreference = 'SilentlyContinue'
     if (Get-Command "uv" -ErrorAction SilentlyContinue) {
         Write-Log "uv already available"
         return $true
@@ -211,7 +212,9 @@ function Ensure-Uv {
         $zipUrl  = "https://github.com/astral-sh/uv/releases/download/$uvVersion/uv-$arch-pc-windows-msvc.zip"
         $zipPath = Join-Path $env:TEMP "uv-$uvVersion-$arch.zip"
         Write-Log "Downloading uv $uvVersion ($arch): $zipUrl"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+        Write-Log "Downloading zip (timeout 120 s): $zipUrl"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
+        Write-Log ("Downloaded zip: {0} bytes" -f (Get-Item $zipPath).Length)
         $actual   = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToUpper()
         $expected = $uvSha.ToUpper()
         if ($actual -ne $expected) {
