@@ -96,7 +96,7 @@ function Write-Manifest {
             claude_auto_preexisting        = $script:claudeAutoPreexisting
             claude_auto_installed_by_us    = $script:claudeAutoInstalled
             claude_auto_upgrade_from_our_previous = $script:claudeAutoUpgradeFromOurPrevious
-            version                        = "1.1.0"
+            version                        = "1.0.0"
         }
         if ($FccVersion) { $manifest.fcc_version = $FccVersion }
         $json = $manifest | ConvertTo-Json -Depth 5
@@ -240,8 +240,11 @@ function Ensure-Uv {
 function Install-Fcc {
     param([string]$Version)
     Write-Log "Installing FCC version $Version via uv (tool dir: $UvToolDir)"
+    Write-Log "Ensuring Python 3.14.10 via uv"
+    $pyOut = & "uv" python install 3.14.10 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-ErrorLog "uv python install 3.14.10 failed: $pyOut"; return $false }
     try {
-        $output = & "uv" tool install "free-claude-code==$Version" 2>&1
+        $output = & "uv" tool install --python 3.14.10 "free-claude-code==$Version" 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "FCC installation failed: $output"
             return $false
