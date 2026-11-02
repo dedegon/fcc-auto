@@ -1,4 +1,4 @@
-﻿; claude-auto Inno Setup Script
+; claude-auto Inno Setup Script
 ; Variant B: User-level install, HKCU registry, HKCU\Environment PATH, asInvoker
 ; Requires Inno Setup 6.2+
 
@@ -53,7 +53,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "installfcc"; Description: "Install Free Claude Code (FCC) via uv"; GroupDescription: "Optional components"; Flags: checked
+Name: "installfcc"; Description: "Install Free Claude Code (FCC) via uv"; GroupDescription: "Optional components"; Flags: unchecked
 Name: "uninstallfcc"; Description: "Remove Free Claude Code (FCC) on uninstall"; GroupDescription: "Uninstall options"; Flags: unchecked
 
 [Files]
@@ -72,6 +72,10 @@ Source: "model_limits\registry.py"; DestDir: "{app}\model_limits"; Flags: ignore
 ; FCC version file (embedded in installer)
 Source: "dist\fcc.version"; DestDir: "{app}"; Flags: ignoreversion
 
+; uv version and checksum (read by claude-auto-install.ps1 at install time)
+Source: "uv.version"; DestDir: "{app}"; Flags: ignoreversion
+Source: "uv.sha256";  DestDir: "{app}"; Flags: ignoreversion
+
 ; PowerShell installer and uninstaller scripts
 Source: "claude-auto-install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "claude-auto-uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -83,12 +87,12 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{localappdata}\{#MyAppName}\uv-
 
 [Run]
 ; Run the PowerShell installer after file copy
-; Parameters are built in PrepareToInstall and passed via {param:InstallParams}
-Filename: "powershell.exe"; Parameters: "{param:InstallParams}"; StatusMsg: "Installing claude-auto and dependencies..."; Flags: runhidden waituntilterminated shellexec
+; Parameters are built by GetInstallParams (see [Code]) and passed via {code:GetInstallParams}
+Filename: "powershell.exe"; Parameters: "{code:GetInstallParams}"; StatusMsg: "Installing claude-auto and dependencies..."; Flags: runhidden waituntilterminated shellexec
 
 [UninstallRun]
 ; Run the PowerShell uninstaller before file removal
-Filename: "powershell.exe"; Parameters: "{param:UninstallParams}"; Flags: runhidden waituntilterminated shellexec
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\claude-auto-uninstall.ps1"" -ManifestPath ""{localappdata}\{#MyAppName}\install.json"" -Force"; Flags: runhidden waituntilterminated shellexec
 
 [Code]
 var
@@ -100,6 +104,16 @@ var
   IsUpgradeFromOurInstall: Boolean;
   FCCWasInstalledByUs: Boolean;
 
+function GetFCCVersionFromExe(ExePath: String): String; forward;
+function CheckFCCViaUvToolList(var Version: String): Boolean; forward;
+function CheckClaudeAutoViaUvToolList(var Version: String): Boolean; forward;
+function CheckManifestForOurInstall(): Boolean; forward;
+function CheckManifestForFCCInstalledByUs(): Boolean; forward;
+function BoolToStrLocal(B: Boolean; UseBoolStrs: Boolean): String;
+begin
+  if B then Result := 'True' else Result := 'False';
+end;
+
 function InitializeSetup(): Boolean;
 begin
   // Detect existing FCC installation
@@ -108,7 +122,7 @@ begin
   FCCInstallPath := '';
 
   // Check 1: file in %USERPROFILE%\.local\bin
-  FCCInstallPath := ExpandConstant('{userprofile}\.local\bin\fcc-server.exe');
+  FCCInstallPath := ExpandConstant('{%USERPROFILE}\.local\bin\fcc-server.exe');
   if FileExists(FCCInstallPath) then begin
     FCCDetected := True;
     FCCVersionStr := GetFCCVersionFromExe(FCCInstallPath);
@@ -159,7 +173,7 @@ begin
   Version := '';
 
   // Check if uv is in PATH
-  UvPath := ExpandConstant('{userprofile}\.local\bin\uv.exe');
+  UvPath := ExpandConstant('{%USERPROFILE}\.local\bin\uv.exe');
   if not FileExists(UvPath) then begin
     UvPath := 'uv';
   end;
@@ -212,12 +226,12 @@ begin
 
   // We'll add labels to the wpReady page instead (after directory selection)
   // For now, just log detection results
-  Log('FCC Detected: ' + BoolToStr(FCCDetected, True));
+  Log('FCC Detected: ' + BoolToStrLocal(FCCDetected, True));
   if FCCDetected then Log('FCC Version: ' + FCCVersionStr);
-  Log('claude-auto Detected: ' + BoolToStr(ClaudeAutoDetected, True));
+  Log('claude-auto Detected: ' + BoolToStrLocal(ClaudeAutoDetected, True));
   if ClaudeAutoDetected then Log('claude-auto Version: ' + ClaudeAutoVersionStr);
-  Log('Is Upgrade From Our Install: ' + BoolToStr(IsUpgradeFromOurInstall, True));
-  Log('FCC Was Installed By Us: ' + BoolToStr(FCCWasInstalledByUs, True));
+  Log('Is Upgrade From Our Install: ' + BoolToStrLocal(IsUpgradeFromOurInstall, True));
+  Log('FCC Was Installed By Us: ' + BoolToStrLocal(FCCWasInstalledByUs, True));
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -252,64 +266,49 @@ begin
   if CurPageID = wpReady then begin
     // If this is an upgrade, confirm
     if IsUpgradeFromOurInstall then begin
-      if not MsgBox('An existing claude-auto installation was detected. This will upgrade it. Continue?', mbConfirmation, MB_YESNO) = IDYES then begin
+      if MsgBox('An existing claude-auto installation was detected. This will upgrade it. Continue?', mbConfirmation, MB_YESNO) <> IDYES then begin
         Result := False;
       end;
     end;
   end;
 end;
 
-function PrepareToInstall(var NeedsRestart: Boolean): Boolean;
-var
-  InstallParams: String;
-  UninstallParams: String;
-begin
-  // Build install parameters
-  InstallParams := '-NoProfile -ExecutionPolicy Bypass -File "{app}\claude-auto-install.ps1"';
-  InstallParams := InstallParams + ' -InstallDir "{localappdata}\{#MyAppName}\app"';
-  InstallParams := InstallParams + ' -DataDir "{localappdata}\{#MyAppName}"';
-  InstallParams := InstallParams + ' -FccVersionFile "{app}\fcc.version"';
-  InstallParams := InstallParams + ' -SourceDir "{app}"';
+    function GetInstallParams(Param: String): String;
+    var
+      P: String;
+    begin
+      P := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\claude-auto-install.ps1') + '"';
+      P := P + ' -InstallDir "' + ExpandConstant('{localappdata}\{#MyAppName}\app') + '"';
+      P := P + ' -DataDir "' + ExpandConstant('{localappdata}\{#MyAppName}') + '"';
+      P := P + ' -FccVersionFile "' + ExpandConstant('{app}\fcc.version') + '"';
+      P := P + ' -SourceDir "' + ExpandConstant('{app}') + '"';
+      if WizardIsTaskSelected('installfcc') then
+        P := P + ' -InstallFcc';
+      if WizardSilent then
+        P := P + ' -Silent';
+      Result := P;
+    end;
 
-  if IsTaskSelected('installfcc') then
-    InstallParams := InstallParams + ' -InstallFcc';
+    function PrepareToInstall(var NeedsRestart: Boolean): String;
+    begin
+      Result := '';
+    end;
 
-  if WizardSilent then
-    InstallParams := InstallParams + ' -Silent';
+    procedure CurStepChanged(CurStep: TSetupStep);
+    begin
+      if CurStep = ssPostInstall then begin
+        // Installation completed successfully
+        Log('Installation completed');
+      end;
+    end;
 
-  // Store for [Run] section via {param:InstallParams}
-  SetSetupSetting('InstallParams', InstallParams);
-
-  // Build uninstall parameters
-  UninstallParams := '-NoProfile -ExecutionPolicy Bypass -File "{app}\claude-auto-uninstall.ps1"';
-  UninstallParams := UninstallParams + ' -ManifestPath "{localappdata}\{#MyAppName}\install.json"';
-
-  if IsTaskSelected('uninstallfcc') then
-    UninstallParams := UninstallParams + ' -DeleteFcc';
-
-  // Always use -Force for uninstall (non-interactive)
-  UninstallParams := UninstallParams + ' -Force';
-
-  if WizardSilent then
-    UninstallParams := UninstallParams + ' -Silent';
-
-  // Store for [UninstallRun] section via {param:UninstallParams}
-  SetSetupSetting('UninstallParams', UninstallParams);
-
-  Result := True;
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then begin
-    // Installation completed successfully
-    Log('Installation completed');
-  end
-  else if CurStep = ssUninstall then begin
-    // Uninstall started
-    Log('Uninstall started');
-  end;
-end;
+    procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+    begin
+      if CurUninstallStep = usUninstall then begin
+        // Uninstall started
+        Log('Uninstall started');
+      end;
+    end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
@@ -352,5 +351,10 @@ Type: filesandordirs; Name: "{app}"
 [Registry]
 ; Inno Setup creates its own uninstall key in HKCU
 ; We don't need additional registry entries
+
+
+
+
+
 
 
