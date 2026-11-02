@@ -195,18 +195,37 @@ function Ensure-Uv {
         Write-Log "uv already available"
         return $true
     }
-    Write-Log "Installing uv from astral.sh"
+    Write-Log "Installing uv (pinned version) from GitHub release"
     try {
-        $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-ErrorLog "uv installation failed: $output"
+        $uvVersionFile = Join-Path $scriptDir "uv.version"
+        $uvShaFile     = Join-Path $scriptDir "uv.sha256"
+        if (-not (Test-Path $uvVersionFile)) { Write-ErrorLog "uv.version not found: $uvVersionFile"; return $false }
+        if (-not (Test-Path $uvShaFile))     { Write-ErrorLog "uv.sha256 not found: $uvShaFile";     return $false }
+        $uvVersion = (Get-Content $uvVersionFile -Raw).Trim()
+        $uvSha     = (Get-Content $uvShaFile     -Raw).Trim()
+        if (-not $uvVersion -or -not $uvSha) {
+            Write-ErrorLog "uv.version or uv.sha256 is empty"
             return $false
         }
-        # Refresh PATH for current process
+        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+        $zipUrl  = "https://github.com/astral-sh/uv/releases/download/$uvVersion/uv-$arch-pc-windows-msvc.zip"
+        $zipPath = Join-Path $env:TEMP "uv-$uvVersion-$arch.zip"
+        Write-Log "Downloading uv $uvVersion ($arch): $zipUrl"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+        $actual   = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToUpper()
+        $expected = $uvSha.ToUpper()
+        if ($actual -ne $expected) {
+            Write-ErrorLog "uv SHA256 mismatch: expected $expected, got $actual"
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            return $false
+        }
         $localBin = Join-Path $env:USERPROFILE ".local\bin"
+        if (-not (Test-Path $localBin)) { New-Item -ItemType Directory -Path $localBin -Force | Out-Null }
+        Expand-Archive -Path $zipPath -DestinationPath $localBin -Force
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
         $env:PATH = "$localBin;$env:PATH"
         if (Get-Command "uv" -ErrorAction SilentlyContinue) {
-            Write-Log "uv installed successfully"
+            Write-Log "uv installed successfully (pinned $uvVersion, SHA256 verified)"
             return $true
         }
         Write-ErrorLog "uv installed but not found in PATH"
