@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     claude-auto uninstaller - removes claude-auto and optionally FCC based on manifest ownership.
 .DESCRIPTION
@@ -309,6 +309,7 @@ function Remove-Directories {
         try {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
             Write-Log "Removed: $dir"
+            $script:removedCount++
         }
         catch {
             Write-ErrorLog ("Failed to remove {0}: {1}" -f $dir, $_.Exception.Message)
@@ -322,6 +323,7 @@ function Remove-Directories {
             if (Test-Path -LiteralPath $item) {
                 Remove-Item -LiteralPath $item -Recurse -Force -ErrorAction Stop
                 Write-Log "Removed: $item"
+            $script:removedCount++
             }
         }
         catch {
@@ -337,6 +339,7 @@ function Remove-Directories {
             try {
                 Remove-Item -LiteralPath $Manifest.data_dir -Force -ErrorAction Stop
                 Write-Log "Removed data directory: $($Manifest.data_dir)"
+                $script:removedCount++
             }
             catch {
                 Write-ErrorLog ("Failed to remove data directory {0}: {1}" -f $Manifest.data_dir, $_.Exception.Message)
@@ -474,6 +477,7 @@ function Main {
         }
 
         # 3. Remove directories
+        $script:removedCount = 0
         Remove-Directories -Manifest $manifest
 
         # 4. Remove from PATH
@@ -482,13 +486,17 @@ function Main {
         # 5. Remove uninstall registry
         Remove-UninstallRegistry -Manifest $manifest
 
-        if ($success) {
-            Write-Log "=== Uninstallation completed successfully ==="
+        if (-not $success) {
+            Write-ErrorLog "=== Uninstallation completed with errors ==="
+            $script:exitCode = 1
+        }
+        elseif ($script:removedCount -gt 0) {
+            Write-Log "=== Uninstallation completed: $($script:removedCount) item(s) removed ==="
             $script:exitCode = 0
         }
         else {
-            Write-ErrorLog "=== Uninstallation completed with errors ==="
-            $script:exitCode = 1
+            Write-Log "=== Nothing removed (ownership not confirmed or nothing to remove) ==="
+            $script:exitCode = 0
         }
     }
     catch {
