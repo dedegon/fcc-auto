@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.venv/
+*.log
+scan_results.json
+cache.json
+claude-settings.json
+.env
