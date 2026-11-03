@@ -29,6 +29,24 @@ param(
 # State
 $script:exitCode = 0
 
+# Resolve uv executable path
+function Resolve-UvExe {
+    # Check user profile local bin
+    $userUv = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+    if (Test-Path -LiteralPath $userUv) {
+        Write-Log "Resolved uv from user profile: $userUv"
+        return $userUv
+    }
+    # Check via Get-Command (PATH)
+    $cmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -ne "Alias") {
+        Write-Log "Resolved uv from PATH: $($cmd.Source)"
+        return $cmd.Source
+    }
+    Write-Log "uv not found in USERPROFILE\.local\bin or PATH"
+    return $null
+}
+
 # Logging functions
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -216,7 +234,18 @@ function Uninstall-ClaudeAuto {
         Write-Log "Using UV_TOOL_DIR: $uvToolDir"
         Write-Log "Using UV_TOOL_BIN_DIR: $uvToolBinDir"
 
-        $output = & "uv" tool uninstall "claude-auto" 2>&1
+        $uvExe = Resolve-UvExe
+        if (-not $uvExe) {
+            # uv not found - check if claude-auto.exe already gone from bin dir
+            $claudeAutoExe = Join-Path $uvToolBinDir "claude-auto.exe"
+            if (-not (Test-Path -LiteralPath $claudeAutoExe)) {
+                Write-Log "uv not found; claude-auto is removed from uv-tools by directory cleanup"
+                return $true
+            }
+            Write-ErrorLog "uv not found; claude-auto.exe still present at $claudeAutoExe"
+            return $false
+        }
+        $output = & $uvExe tool uninstall "claude-auto" 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Log "claude-auto uninstalled successfully"
             return $true
@@ -247,7 +276,18 @@ function Uninstall-Fcc {
         $env:UV_TOOL_DIR = $uvToolDir
         $env:UV_TOOL_BIN_DIR = $uvToolBinDir
 
-        $output = & "uv" tool uninstall "free-claude-code" 2>&1
+        $uvExe = Resolve-UvExe
+        if (-not $uvExe) {
+            # uv not found - check if free-claude-code.exe already gone from bin dir
+            $fccExe = Join-Path $uvToolBinDir "free-claude-code.exe"
+            if (-not (Test-Path -LiteralPath $fccExe)) {
+                Write-Log "uv not found; FCC is removed from uv-tools by directory cleanup"
+                return $true
+            }
+            Write-ErrorLog "uv not found; free-claude-code.exe still present at $fccExe"
+            return $false
+        }
+        $output = & $uvExe tool uninstall "free-claude-code" 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Log "FCC uninstalled successfully"
             return $true
