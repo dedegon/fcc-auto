@@ -10,6 +10,7 @@
 
 ; Build output directory
 #define BuildOutputDir "dist"
+#define SourceDir "."
 
 [Setup]
 AppId={{C3F8E9B2-7A4D-4F1E-9B6A-1D2E3F4A5B6C}
@@ -27,10 +28,14 @@ InfoBeforeFile=
 InfoAfterFile=
 OutputDir={#BuildOutputDir}
 OutputBaseFilename=install-claude-auto-V{#MyAppVersion}
-SetupIconFile=
+SetupIconFile={#SourceDir}\assets\icon.ico
+WizardImageFile={#SourceDir}\assets\wizard.bmp
+WizardSmallImageFile={#SourceDir}\assets\wizard_small.bmp
+UninstallDisplayIcon={#SourceDir}\assets\icon.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+ShowLanguageDialog=no
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64
 ArchitecturesAllowed=x64
@@ -50,6 +55,7 @@ AlwaysShowGroupOnReadyPage=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
