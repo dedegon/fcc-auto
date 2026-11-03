@@ -29,7 +29,7 @@ param(
     [string]$DataDir = "$env:LOCALAPPDATA\claude-auto",
     [switch]$InstallFcc,
     [switch]$Silent,
-    [string]$ManifestPath = "$env:LOCALAPPDATA\claude-auto\install.json",
+    [string]$ManifestPath,
     [string]$FccVersionFile,
     [string]$SourceDir,
     [string]$LogPath
@@ -39,7 +39,13 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 if (-not $FccVersionFile) { $FccVersionFile = Join-Path $scriptDir "fcc.version" }
 if (-not $SourceDir) { $SourceDir = $scriptDir }
+# Ensure DataDir exists for logging and manifest
+if (-not (Test-Path -LiteralPath $DataDir)) {
+    New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+}
 if (-not $LogPath) { $LogPath = Join-Path $DataDir "install.log" }
+# Default ManifestPath to DataDir\install.json if not provided
+if (-not $ManifestPath) { $ManifestPath = Join-Path $DataDir "install.json" }
 
 # Dedicated uv tool environment for isolation
 $UvToolDir = Join-Path $DataDir "uv-tools"
@@ -164,7 +170,21 @@ function Detect-Fcc {
 }
 
 function Detect-ClaudeAuto {
-    # Check if claude-auto is already installed in our dedicated uv tool environment
+    # Check if claude-auto is already installed in OUR dedicated uv tool environment
+    $claudeExe = Join-Path $UvToolBinDir "claude-auto.exe"
+    if (Test-Path -LiteralPath $claudeExe) {
+        try {
+            $version = & $claudeExe --version 2>$null
+            if ($version) {
+                Write-Log "Pre-existing claude-auto detected in our uv tool dir (version: $version)"
+                return @{ State = "Installed"; Version = $version.Trim() }
+            }
+        } catch { }
+        Write-Log "Pre-existing claude-auto detected in our uv tool dir (version unknown)"
+        return @{ State = "Installed"; Version = "unknown" }
+    }
+
+    # Also check uv tool list in our dedicated environment
     try {
         $output = & "uv" tool list 2>$null
         if ($output -and $output -match "claude-auto") {
@@ -177,16 +197,7 @@ function Detect-ClaudeAuto {
         }
     } catch { }
 
-    # Also check if claude-auto executable is in PATH
-    try {
-        $cmd = Get-Command "claude-auto" -ErrorAction SilentlyContinue
-        if ($cmd) {
-            Write-Log "Pre-existing claude-auto detected via Get-Command"
-            return @{ State = "Installed"; Version = "unknown" }
-        }
-    } catch { }
-
-    Write-Log "claude-auto not detected"
+    Write-Log "claude-auto not detected in our uv tool environment"
     return @{ State = "NotInstalled"; Version = $null }
 }
 
