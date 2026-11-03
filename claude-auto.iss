@@ -3,7 +3,7 @@
 ; Requires Inno Setup 6.2+
 
 #define MyAppName "claude-auto"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "claude-auto"
 #define MyAppURL "https://github.com/claude-auto/claude-auto"
 #define MyAppExeName "claude-auto.exe"
