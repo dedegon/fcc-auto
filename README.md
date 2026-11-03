@@ -17,11 +17,7 @@
 
 ## Установка
 
-Из любой папки:
-
-    git clone https://github.com/dedegon/fcc-auto.git
-    cd fcc-auto
-    .\install.ps1
+Скачайте и запустите установщик `install-claude-auto-V1.0.0.exe` (или более новую версию) со страницы релизов.
 
 Установщик ставит uv (если его нет), FCC официальным установщиком (если `fcc-server` не найден), затем `claude-auto`, и проверяет `claude-auto --help`. Если проверка падает, `claude-auto` откатывается. FCC и Claude Code остаются.
 
@@ -29,8 +25,8 @@
 
 ## Удаление
 
-    .\install.ps1 -Uninstall          # спросит подтверждение
-    .\install.ps1 -Uninstall -Yes     # без вопроса
+В «Параметрах Windows» → «Приложения» → «Установленные приложения» найдите `claude-auto` → «Удалить».
+Или запустите деинсталлятор: `%LOCALAPPDATA%\claude-auto\uninstall.exe` (создаётся установщиком).
 
 Удаляется: команда `claude-auto`, данные и кэш в `%LOCALAPPDATA%\claude-auto`, папка проекта вместе с `.git`. Не затрагиваются FCC, Claude Code и `~\.fcc`.
 
