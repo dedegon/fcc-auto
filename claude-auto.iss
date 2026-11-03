@@ -70,13 +70,14 @@ Source: "scanner.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scanner_config.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "pyproject.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 ; model_limits package
 Source: "model_limits\__init__.py"; DestDir: "{app}\model_limits"; Flags: ignoreversion
 Source: "model_limits\registry.py"; DestDir: "{app}\model_limits"; Flags: ignoreversion
 
 ; FCC version file (embedded in installer)
-Source: "dist\fcc.version"; DestDir: "{app}"; Flags: ignoreversion
+Source: "fcc.version"; DestDir: "{app}"; Flags: ignoreversion
 
 ; uv version and checksum (read by claude-auto-install.ps1 at install time)
 Source: "uv.version"; DestDir: "{app}"; Flags: ignoreversion

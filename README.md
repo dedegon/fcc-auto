@@ -1,5 +1,7 @@
 ﻿# claude-auto
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-blue.svg)]() [![Inno Setup](https://img.shields.io/badge/Installer-Inno%20Setup%206-9b59b6.svg)]()
+
 Автоматический установщик и запускатель для Free Claude Code (FCC). Ставит uv, затем FCC (если есть Python 3.14.10), затем claude-auto. Проверяет `claude-auto --help` после установки.
 
 ---
@@ -17,7 +19,7 @@
 
 FCC слушает на порту **8082** (см. `scanner_config.py:PORT`).
 
-Сборка установщика: **ISCC** (Inno Setup 6) из `claude-auto.iss`. Релиз в процессе — `.exe` будет на странице Releases.
+Сборка установщика: **ISCC** (Inno Setup 6) из `claude-auto.iss`. Готовый установщик: [Releases](https://github.com/dedegon/fcc-auto/releases/latest).
 
 ---
 
