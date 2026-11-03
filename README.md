@@ -1,4 +1,4 @@
-# fcc-auto (claude-auto)
+﻿# fcc-auto (claude-auto)
 
 `claude-auto` запускает FCC (Free Claude Code), проверяет бесплатные модели подключённых провайдеров и открывает Claude Code. В `/model` попадают только модели, которые ответили и поддерживают инструменты.
 
@@ -25,8 +25,7 @@
 
 ## Удаление
 
-В «Параметрах Windows» → «Приложения» → «Установленные приложения» найдите `claude-auto` → «Удалить».
-Или запустите деинсталлятор: `%LOCALAPPDATA%\claude-auto\uninstall.exe` (создаётся установщиком).
+Удалить можно через «Параметры Windows» → «Приложения» → claude-auto или через ярлык «Uninstall claude-auto» в меню «Пуск».
 
 Удаляется: команда `claude-auto`, данные и кэш в `%LOCALAPPDATA%\claude-auto`, папка проекта вместе с `.git`. Не затрагиваются FCC, Claude Code и `~\.fcc`.
 
