@@ -80,6 +80,20 @@ function Write-ErrorLog {
 }
 
 # JSON helper for manifest (simple, no dependencies)
+function Get-ProjectVersion {
+    param([string]$InstallDir)
+    $pyproject = Join-Path $InstallDir "pyproject.toml"
+    if (Test-Path -LiteralPath $pyproject) {
+        $content = Get-Content -LiteralPath $pyproject -Raw
+        if ($content -match 'version\s*=\s*"([^"]+)"') {
+            return $matches[1]
+        }
+    }
+    # Fallback to old behavior
+    if ($script:manifest -and $script:manifest.version) { return $script:manifest.version }
+    return "0.0.0"
+}
+
 function Write-Manifest {
     param(
         [string]$Status,
@@ -88,6 +102,7 @@ function Write-Manifest {
     )
     $path = if ($ManifestPathOverride) { $ManifestPathOverride } else { $ManifestPath }
     try {
+        $version = Get-ProjectVersion -InstallDir $InstallDir
         $manifest = @{
             repo_path                      = $InstallDir
             install_dir                    = $InstallDir
@@ -102,7 +117,7 @@ function Write-Manifest {
             claude_auto_preexisting        = $script:claudeAutoPreexisting
             claude_auto_installed_by_us    = $script:claudeAutoInstalled
             claude_auto_upgrade_from_our_previous = $script:claudeAutoUpgradeFromOurPrevious
-            version                        = "1.0.0"
+            version                        = $version
         }
         if ($FccVersion) { $manifest.fcc_version = $FccVersion }
         $json = $manifest | ConvertTo-Json -Depth 5
@@ -431,6 +446,18 @@ function Backup-ExistingFile {
 function Copy-ProgramFiles {
     Write-Log "Copying program files from $SourceDir to $InstallDir"
     try {
+        # Skip copy if SourceDir == InstallDir (resolved paths)
+        $srcResolved = (Resolve-Path -LiteralPath $SourceDir -ErrorAction SilentlyContinue).Path
+        $dstResolved = (Resolve-Path -LiteralPath $InstallDir -ErrorAction SilentlyContinue).Path
+        if ($srcResolved -and $dstResolved) {
+            $srcResolved = $srcResolved.TrimEnd('\')
+            $dstResolved = $dstResolved.TrimEnd('\')
+            if ($srcResolved -eq $dstResolved) {
+                Write-Log "SourceDir == InstallDir ($srcResolved), skip copy"
+                return $true
+            }
+        }
+
         if (-not (Test-Path -LiteralPath $InstallDir)) {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
             $script:installDirCreated = $true
@@ -519,6 +546,21 @@ function Install-ClaudeAuto {
             Write-ErrorLog "claude-auto installation failed: $output"
             return $false
         }
+
+        # Cleanup build artifacts left by uv's PEP 517 build
+        $artifactsToClean = @("$InstallDir\build", "$InstallDir\claude_auto.egg-info")
+        foreach ($dir in $artifactsToClean) {
+            if (Test-Path -LiteralPath $dir) {
+                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Log "Cleaned up build artifact: $dir"
+            }
+        }
+        Get-ChildItem $InstallDir -Directory -Filter "*.egg-info" -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Log "Cleaned up build artifact: $($_.FullName)"
+            }
+
         $script:claudeAutoInstalled = $true
         $script:claudeAutoInstalledThisRun = $true
         Write-Log "claude-auto installed successfully"
