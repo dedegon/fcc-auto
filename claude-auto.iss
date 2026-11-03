@@ -3,7 +3,7 @@
 ; Requires Inno Setup 6.2+
 
 #define MyAppName "claude-auto"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.0.0.1"
 #define MyAppPublisher "claude-auto"
 #define MyAppURL "https://github.com/claude-auto/claude-auto"
 #define MyAppExeName "claude-auto.exe"
@@ -282,10 +282,20 @@ end;
     function GetInstallParams(Param: String): String;
     var
       P: String;
+      ActualInstallDir: String;
+      ActualDataDir: String;
+      ActualManifestPath: String;
     begin
       P := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\claude-auto-install.ps1') + '"';
-      P := P + ' -InstallDir "' + ExpandConstant('{localappdata}\{#MyAppName}\app') + '"';
-      P := P + ' -DataDir "' + ExpandConstant('{localappdata}\{#MyAppName}') + '"';
+      // Use the actual install directory chosen by user (respects /DIR parameter)
+      ActualInstallDir := ExpandConstant('{app}');
+      // DataDir is FIXED to %LOCALAPPDATA%\claude-auto regardless of /DIR
+      ActualDataDir := ExpandConstant('{localappdata}\{#MyAppName}');
+      // Manifest goes in DataDir
+      ActualManifestPath := ActualDataDir + '\install.json';
+      P := P + ' -InstallDir "' + ActualInstallDir + '"';
+      P := P + ' -DataDir "' + ActualDataDir + '"';
+      P := P + ' -ManifestPath "' + ActualManifestPath + '"';
       P := P + ' -FccVersionFile "' + ExpandConstant('{app}\fcc.version') + '"';
       P := P + ' -SourceDir "' + ExpandConstant('{app}') + '"';
       if WizardIsTaskSelected('installfcc') then
