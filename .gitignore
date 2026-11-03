@@ -11,3 +11,5 @@ claude-settings.json
 .env
 *.exe
 uv.lock
+# Local backup files
+*.bak_fix*
