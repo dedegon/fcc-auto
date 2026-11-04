@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     claude-auto installer logic called by Inno Setup.
 .DESCRIPTION
@@ -79,6 +79,16 @@ function Write-ErrorLog {
     Write-Log $Message "ERROR"
 }
 
+function Get-ProjectVersion {
+    param([string]$InstallDir)
+    $pyproject = Join-Path $InstallDir 'pyproject.toml'
+    if (Test-Path -LiteralPath $pyproject) {
+        $content = Get-Content -LiteralPath $pyproject -Raw
+        if ($content -match 'version\s*=\s*"([^"]+)"') { return $matches[1] }
+    }
+    return '0.0.0'
+}
+
 # JSON helper for manifest (simple, no dependencies)
 function Write-Manifest {
     param(
@@ -88,6 +98,7 @@ function Write-Manifest {
     )
     $path = if ($ManifestPathOverride) { $ManifestPathOverride } else { $ManifestPath }
     try {
+        $version = Get-ProjectVersion -InstallDir $InstallDir
         $manifest = @{
             repo_path                      = $InstallDir
             install_dir                    = $InstallDir
@@ -102,7 +113,7 @@ function Write-Manifest {
             claude_auto_preexisting        = $script:claudeAutoPreexisting
             claude_auto_installed_by_us    = $script:claudeAutoInstalled
             claude_auto_upgrade_from_our_previous = $script:claudeAutoUpgradeFromOurPrevious
-            version                        = "1.0.0"
+            version                        = $version
         }
         if (($script:fccInstalledByUs -or $script:fccPreexisting) -and $FccVersion) { $manifest.fcc_version = $FccVersion }
         $json = $manifest | ConvertTo-Json -Depth 5
