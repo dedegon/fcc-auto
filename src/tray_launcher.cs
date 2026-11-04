@@ -7,16 +7,19 @@ using System.Web.Script.Serialization;
 using System.Drawing;
 using System.Threading;
 using System.Linq;
+using System.Collections.Generic;
 
 public class TrayConfig {
     public TrayConfig() {
         mode = "beep";
         soundPath = "";
-        projectPath = "";
+        projectPaths = new List<string>();
+        launchCount = 0;
     }
     public string mode { get; set; }
     public string soundPath { get; set; }
-    public string projectPath { get; set; }
+    public List<string> projectPaths { get; set; }
+    public int launchCount { get; set; }
 }
 
 public class TrayLauncher : ApplicationContext {
@@ -26,6 +29,8 @@ public class TrayLauncher : ApplicationContext {
     private Process fccProcess = null;
     private Process claudeProcess = null;
     private ToolStripMenuItem showHideLogItem;
+    private ToolStripMenuItem startClaudeMenuItem;
+    private ToolStripMenuItem soundMenu;
 
     [DllImport("winmm.dll")]
     private static extern long mciSendString(string strCommand, System.Text.StringBuilder strReturn, int iReturnLength, IntPtr hwndCallback);
@@ -64,30 +69,29 @@ public class TrayLauncher : ApplicationContext {
 
         AddToStartup();
         StartFccServer();
+        StartClaudeProcedure();
     }
 
     private void BuildContextMenu() {
         ContextMenuStrip menu = new ContextMenuStrip();
 
-        // 🚀 Запустить Claude [ИмяПапки] / Выбрать папку
-        string startLabel = string.IsNullOrEmpty(config.projectPath)
-            ? "🚀 Запустить Claude — Выбрать папку"
-            : "🚀 Запустить Claude [" + new DirectoryInfo(config.projectPath).Name + "]";
-        ToolStripMenuItem startClaude = new ToolStripMenuItem(startLabel);
-        startClaude.Click += StartClaude;
-        menu.Items.Add(startClaude);
+        // 🚀 Запустить Claude (creates submenu if multiple paths)
+        startClaudeMenuItem = new ToolStripMenuItem("🚀 Запустить Claude");
+        startClaudeMenuItem.Click += StartClaudeMain;
+        UpdateStartClaudeMenuItem();
+        menu.Items.Add(startClaudeMenuItem);
+
+        // 📁 Выбрать новую папку...
+        ToolStripMenuItem selectFolder = new ToolStripMenuItem("📁 Выбрать новую папку...");
+        selectFolder.Click += SelectProjectFolder;
+        menu.Items.Add(selectFolder);
+
+        menu.Items.Add(new ToolStripSeparator());
 
         // 👁 Скрыть окно Claude
         ToolStripMenuItem hideClaude = new ToolStripMenuItem("👁 Скрыть окно Claude");
         hideClaude.Click += HideClaude;
         menu.Items.Add(hideClaude);
-
-        // 📁 Выбрать папку проекта...
-        ToolStripMenuItem selectFolder = new ToolStripMenuItem("📁 Выбрать папку проекта...");
-        selectFolder.Click += SelectProjectFolder;
-        menu.Items.Add(selectFolder);
-
-        menu.Items.Add(new ToolStripSeparator());
 
         // 🌐 Открыть панель FCC
         ToolStripMenuItem openFcc = new ToolStripMenuItem("🌐 Открыть панель FCC");
@@ -102,18 +106,18 @@ public class TrayLauncher : ApplicationContext {
         menu.Items.Add(new ToolStripSeparator());
 
         // ⚙️ Настройки звука >
-        ToolStripMenuItem soundMenu = new ToolStripMenuItem("⚙️ Настройки звука");
+        soundMenu = new ToolStripMenuItem("⚙️ Настройки звука");
 
-        ToolStripMenuItem beepItem = new ToolStripMenuItem("🔔 Встроенный писк");
-        beepItem.Click += (s, e) => { config.mode = "beep"; config.soundPath = ""; SaveConfig(); UpdateSoundMenuChecks(soundMenu); };
+        ToolStripMenuItem beepItem = new ToolStripMenuItem("🔔 Писк");
+        beepItem.Click += (s, e) => { config.mode = "beep"; config.soundPath = ""; SaveConfig(); UpdateSoundMenuChecks(); };
         soundMenu.DropDownItems.Add(beepItem);
 
-        ToolStripMenuItem customItem = new ToolStripMenuItem("🎵 Выбрать свой звук...");
+        ToolStripMenuItem customItem = new ToolStripMenuItem("🎵 Свой звук...");
         customItem.Click += SelectCustomSound;
         soundMenu.DropDownItems.Add(customItem);
 
         ToolStripMenuItem noneItem = new ToolStripMenuItem("🔇 Без звука");
-        noneItem.Click += (s, e) => { config.mode = "none"; SaveConfig(); UpdateSoundMenuChecks(soundMenu); };
+        noneItem.Click += (s, e) => { config.mode = "none"; SaveConfig(); UpdateSoundMenuChecks(); };
         soundMenu.DropDownItems.Add(noneItem);
 
         menu.Items.Add(soundMenu);
@@ -126,46 +130,62 @@ public class TrayLauncher : ApplicationContext {
         menu.Items.Add(exit);
 
         trayIcon.ContextMenuStrip = menu;
-        UpdateSoundMenuChecks(soundMenu);
+        UpdateSoundMenuChecks();
     }
 
-    private void UpdateSoundMenuChecks(ToolStripMenuItem soundMenu) {
-        foreach (ToolStripItem item in soundMenu.DropDownItems) {
-            ToolStripMenuItem mi = item as ToolStripMenuItem;
-            if (mi != null) {
-                if (mi.Text.Contains("Встроенный") && config.mode == "beep") mi.Checked = true;
-                else if (mi.Text.Contains("свой звук") && config.mode == "custom") mi.Checked = true;
-                else if (mi.Text.Contains("Без звука") && config.mode == "none") mi.Checked = true;
-                else mi.Checked = false;
+    private void UpdateStartClaudeMenuItem() {
+        startClaudeMenuItem.DropDownItems.Clear();
+
+        if (config.projectPaths.Count == 0) {
+            ToolStripMenuItem noPaths = new ToolStripMenuItem("(путей нет — выберите папку)");
+            noPaths.Enabled = false;
+            startClaudeMenuItem.DropDownItems.Add(noPaths);
+        }
+        else if (config.projectPaths.Count == 1) {
+            string path = config.projectPaths[0];
+            string name = new DirectoryInfo(path).Name;
+            ToolStripMenuItem singleItem = new ToolStripMenuItem("📁 " + name);
+            singleItem.Tag = path;
+            singleItem.Click += StartClaudeFromPath;
+            startClaudeMenuItem.DropDownItems.Add(singleItem);
+        }
+        else {
+            // Multiple paths - create submenu "📁 Пути к проектам >"
+            ToolStripMenuItem pathsSubmenu = new ToolStripMenuItem("📁 Пути к проектам");
+            foreach (string path in config.projectPaths) {
+                string name = new DirectoryInfo(path).Name;
+                ToolStripMenuItem pathItem = new ToolStripMenuItem("📁 " + name);
+                pathItem.Tag = path;
+                pathItem.Click += StartClaudeFromPath;
+                pathsSubmenu.DropDownItems.Add(pathItem);
             }
+            // Add "➕ Выбрать новую папку" at the bottom
+            ToolStripMenuItem addNew = new ToolStripMenuItem("➕ Выбрать новую папку");
+            addNew.Click += SelectProjectFolder;
+            pathsSubmenu.DropDownItems.Add(new ToolStripSeparator());
+            pathsSubmenu.DropDownItems.Add(addNew);
+            startClaudeMenuItem.DropDownItems.Add(pathsSubmenu);
         }
     }
 
-    private void StartFccServer() {
-        try {
-            ProcessStartInfo psi = new ProcessStartInfo("fcc-server") {
-                UseShellExecute = false,
-                CreateNoWindow = false,
-                WindowStyle = ProcessWindowStyle.Normal
-            };
-            fccProcess = Process.Start(psi);
-            if (fccProcess != null) {
-                Thread.Sleep(1000);
-                if (fccProcess.MainWindowHandle != IntPtr.Zero) {
-                    ShowWindow(fccProcess.MainWindowHandle, SW_HIDE);
-                }
-            }
-        } catch {
-            // fcc-server might not be in PATH, ignore silently
-        }
-    }
-
-    private void StartClaude(object sender, EventArgs e) {
-        if (string.IsNullOrEmpty(config.projectPath)) {
+    private void StartClaudeMain(object sender, EventArgs e) {
+        // If no paths, trigger folder selection
+        if (config.projectPaths.Count == 0) {
             SelectProjectFolder(sender, e);
-            return;
         }
-        LaunchClaude();
+        else if (config.projectPaths.Count == 1) {
+            // Direct launch with the single path
+            LaunchClaude(config.projectPaths[0]);
+        }
+        // If multiple paths, the submenu handles it - this click just opens the dropdown
+    }
+
+    private void StartClaudeFromPath(object sender, EventArgs e) {
+        ToolStripMenuItem item = sender as ToolStripMenuItem;
+        if (item != null && item.Tag != null && item.Tag is string) {
+            string path = item.Tag as string;
+            LaunchClaude(path);
+        }
     }
 
     private void SelectProjectFolder(object sender, EventArgs e) {
@@ -173,25 +193,27 @@ public class TrayLauncher : ApplicationContext {
             fbd.Description = "Выберите папку проекта для claude-auto";
             fbd.ShowNewFolderButton = true;
             if (fbd.ShowDialog() == DialogResult.OK) {
-                config.projectPath = fbd.SelectedPath;
-                SaveConfig();
-                // Update the start menu item text
-                if (trayIcon.ContextMenuStrip != null && trayIcon.ContextMenuStrip.Items.Count > 0) {
-                    var startItem = trayIcon.ContextMenuStrip.Items[0] as ToolStripMenuItem;
-                    if (startItem != null) {
-                        startItem.Text = "🚀 Запустить Claude [" + new DirectoryInfo(config.projectPath).Name + "]";
-                    }
+                string selectedPath = fbd.SelectedPath;
+                // Add to list if not already present
+                if (!config.projectPaths.Contains(selectedPath)) {
+                    config.projectPaths.Add(selectedPath);
+                    SaveConfig();
                 }
-                LaunchClaude();
+                // Move to front (most recently used)
+                config.projectPaths.Remove(selectedPath);
+                config.projectPaths.Insert(0, selectedPath);
+                SaveConfig();
+                UpdateStartClaudeMenuItem();
+                LaunchClaude(selectedPath);
             }
         }
     }
 
-    private void LaunchClaude() {
+    private void LaunchClaude(string workingDir) {
         try {
             ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/k claude-auto") {
                 UseShellExecute = true,
-                WorkingDirectory = config.projectPath
+                WorkingDirectory = workingDir
             };
             claudeProcess = Process.Start(psi);
             if (claudeProcess != null) {
@@ -203,6 +225,55 @@ public class TrayLauncher : ApplicationContext {
             }
         } catch (Exception ex) {
             MessageBox.Show("Ошибка запуска: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void StartClaudeProcedure() {
+        config.launchCount++;
+        SaveConfig();
+
+        // If no project paths, show folder browser
+        if (config.projectPaths.Count == 0) {
+            using (FolderBrowserDialog fbd = new FolderBrowserDialog()) {
+                fbd.Description = "Выберите папку проекта для claude-auto (первый запуск)";
+                fbd.ShowNewFolderButton = true;
+                if (fbd.ShowDialog() == DialogResult.OK) {
+                    config.projectPaths.Add(fbd.SelectedPath);
+                    SaveConfig();
+                    UpdateStartClaudeMenuItem();
+                    LaunchClaude(fbd.SelectedPath);
+                }
+                else {
+                    // User cancelled - still continue, they can select later from menu
+                }
+            }
+        }
+        else {
+            // Launch with the most recent path
+            LaunchClaude(config.projectPaths[0]);
+        }
+
+        // First launch welcome
+        if (config.launchCount == 1) {
+            try { Process.Start("http://127.0.0.1:8082/admin"); } catch { }
+            MessageBox.Show(
+                "Добро пожаловать! Управление программой находится в трее (возле часов).\nТам же настройки звука и выбор папок.",
+                "claude-auto",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information
+            );
+        }
+        // Second launch - ask about FCC models
+        else if (config.launchCount == 2) {
+            DialogResult res = MessageBox.Show(
+                "Хотите настроить модели в панели FCC?",
+                "Настройка",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question
+            );
+            if (res == DialogResult.Yes) {
+                try { Process.Start("http://127.0.0.1:8082/admin"); } catch { }
+            }
         }
     }
 
@@ -248,7 +319,20 @@ public class TrayLauncher : ApplicationContext {
                 config.mode = "custom";
                 config.soundPath = ofd.FileName;
                 SaveConfig();
-                UpdateSoundMenuChecks(trayIcon.ContextMenuStrip.Items.OfType<ToolStripMenuItem>().FirstOrDefault(m => m.Text.Contains("Настройки звука")));
+                UpdateSoundMenuChecks();
+            }
+        }
+    }
+
+    private void UpdateSoundMenuChecks() {
+        if (soundMenu == null) return;
+        foreach (ToolStripItem item in soundMenu.DropDownItems) {
+            ToolStripMenuItem mi = item as ToolStripMenuItem;
+            if (mi != null) {
+                if (mi.Text.Contains("Писк") && config.mode == "beep") mi.Checked = true;
+                else if (mi.Text.Contains("Свой звук") && config.mode == "custom") mi.Checked = true;
+                else if (mi.Text.Contains("Без звука") && config.mode == "none") mi.Checked = true;
+                else mi.Checked = false;
             }
         }
     }
@@ -271,14 +355,34 @@ public class TrayLauncher : ApplicationContext {
         }
     }
 
+    private void StartFccServer() {
+        try {
+            ProcessStartInfo psi = new ProcessStartInfo("fcc-server") {
+                UseShellExecute = true,
+                CreateNoWindow = false,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            fccProcess = Process.Start(psi);
+            if (fccProcess != null) {
+                Thread.Sleep(1000);
+                if (fccProcess.MainWindowHandle != IntPtr.Zero) {
+                    ShowWindow(fccProcess.MainWindowHandle, SW_HIDE);
+                }
+            }
+        } catch {
+            // fcc-server might not be in PATH, ignore silently
+        }
+    }
+
     private void LoadConfig() {
         try {
             if (File.Exists(configPath)) {
                 string json = File.ReadAllText(configPath);
                 config = new JavaScriptSerializer().Deserialize<TrayConfig>(json);
-                // Ensure projectPath exists for older configs
-                if (config.projectPath == null) config.projectPath = "";
+                // Ensure fields exist for older configs
+                if (config.projectPaths == null) config.projectPaths = new List<string>();
                 if (config.soundPath == null) config.soundPath = "";
+                if (config.mode == null) config.mode = "beep";
             } else { config = new TrayConfig(); }
         } catch { config = new TrayConfig(); }
     }

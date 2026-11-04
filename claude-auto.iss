@@ -58,7 +58,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "installfcc"; Description: "Install Free Claude Code (FCC) via uv"; GroupDescription: "Optional components"; Flags: unchecked
 Name: "uninstallfcc"; Description: "Remove Free Claude Code (FCC) on uninstall"; GroupDescription: "Uninstall options"; Flags: unchecked
 
@@ -90,10 +90,13 @@ Source: "claude-auto-uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 ; C# Tray Launcher
 Source: "dist\tray_launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; Offline wheels cache
+Source: "dist\wheels\*"; DestDir: "{app}\wheels"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; IconFilename: "{app}\tray_launcher.exe"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; WorkingDir: "{app}"; Comment: "Uninstall claude-auto"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; Tasks: desktopicon; IconFilename: "{app}\tray_launcher.exe"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; Tasks: desktopicon; IconFilename: "{app}\tray_launcher.exe"
 
 [Run]
 ; Run the PowerShell installer after file copy

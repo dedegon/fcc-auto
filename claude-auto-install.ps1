@@ -415,7 +415,18 @@ function Install-Fcc {
 
     # d) Install FCC using found Python
     try {
-        $output = & "uv" tool install --python $pyPath "free-claude-code==$Version" 2>&1
+        $uvArgs = @("tool", "install", "--python", $pyPath, "free-claude-code==$Version", "--no-managed-python")
+
+        # Offline wheels cache support
+        $wheelsDir = Join-Path $SourceDir "wheels"
+        if (Test-Path -LiteralPath $wheelsDir) {
+            $uvArgs += "--find-links"
+            $uvArgs += $wheelsDir
+            $uvArgs += "--no-index"
+            Write-Log "Using offline wheels cache for FCC: $wheelsDir"
+        }
+
+        $output = & "uv" $uvArgs 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "FCC installation failed: $output"
             return $false
@@ -535,12 +546,26 @@ function Install-ClaudeAuto {
         # Find system Python to avoid os error 448 on Windows 11 24H2+
         $systemPython = Find-SystemPython
         $uvArgs = @("tool", "install", "--from", $SourceDir, "--force", "claude-auto")
+
+        # Add --no-managed-python flag to avoid managed Python issues (uv 0.4.0+)
+        $uvArgs += "--no-managed-python"
+
         if ($systemPython) {
-            $uvArgs = @("tool", "install", "--from", $SourceDir, "--python", $systemPython, "--force", "claude-auto")
+            $uvArgs = @("tool", "install", "--from", $SourceDir, "--python", $systemPython, "--force", "claude-auto", "--no-managed-python")
             Write-Log "Using system Python for uv tool install: $systemPython"
         } else {
-            Write-Log "[WARN] System Python 3.11+ not found, falling back to managed Python (may fail on Windows 11 24H2+ with os error 448)"
+            Write-Log "[WARN] System Python 3.11+ not found, using --no-managed-python flag (may fail on Windows 11 24H2+ with os error 448)"
         }
+
+        # Offline wheels cache support
+        $wheelsDir = Join-Path $SourceDir "wheels"
+        if (Test-Path -LiteralPath $wheelsDir) {
+            $uvArgs += "--find-links"
+            $uvArgs += $wheelsDir
+            $uvArgs += "--no-index"
+            Write-Log "Using offline wheels cache: $wheelsDir"
+        }
+
         $output = & "uv" $uvArgs 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "claude-auto installation failed: $output"
@@ -704,7 +729,25 @@ function Main {
         Write-Log "InstallFcc: $InstallFcc"
         Write-Log "Silent: $Silent"
 
-        # Step 0: Read existing manifest to detect upgrade from our previous install
+        # Step 0: RESET launchCount in tray_config.json (preserve other settings)
+        $trayConfigPath = Join-Path $DataDir "tray_config.json"
+        if (Test-Path -LiteralPath $trayConfigPath) {
+            try {
+                $json = Get-Content -LiteralPath $trayConfigPath -Raw -Encoding UTF8
+                $trayConfig = $json | ConvertFrom-Json
+                if ($trayConfig) {
+                    $trayConfig.launchCount = 0
+                    $newJson = $trayConfig | ConvertTo-Json -Depth 5
+                    $newJson | Out-File -FilePath $trayConfigPath -Encoding UTF8
+                    Write-Log "Reset launchCount to 0 in tray_config.json (preserved other settings)"
+                }
+            }
+            catch {
+                Write-Log "Failed to reset launchCount in tray_config.json: $($_.Exception.Message)" "WARN"
+            }
+        }
+
+        # Step 0b: Read existing manifest to detect upgrade from our previous install
         $existingManifest = $null
         if (Test-Path -LiteralPath $ManifestPath) {
             try {
