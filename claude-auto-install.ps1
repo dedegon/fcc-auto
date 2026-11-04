@@ -104,7 +104,7 @@ function Write-Manifest {
             claude_auto_upgrade_from_our_previous = $script:claudeAutoUpgradeFromOurPrevious
             version                        = "1.0.0"
         }
-        if ($FccVersion) { $manifest.fcc_version = $FccVersion }
+        if (($script:fccInstalledByUs -or $script:fccPreexisting) -and $FccVersion) { $manifest.fcc_version = $FccVersion }
         $json = $manifest | ConvertTo-Json -Depth 5
         $json | Out-File -FilePath $path -Encoding UTF8
         Write-Log "Manifest written: $Status"
@@ -173,11 +173,16 @@ function Detect-ClaudeAuto {
     # Check if claude-auto is already installed in OUR dedicated uv tool environment
     $claudeExe = Join-Path $UvToolBinDir "claude-auto.exe"
     if (Test-Path -LiteralPath $claudeExe) {
+        # Check uv tool list for version (don't run claude-auto.exe --version)
         try {
-            $version = & $claudeExe --version 2>$null
-            if ($version) {
-                Write-Log "Pre-existing claude-auto detected in our uv tool dir (version: $version)"
-                return @{ State = "Installed"; Version = $version.Trim() }
+            $output = & "uv" tool list 2>$null
+            if ($output -and $output -match "claude-auto") {
+                $match = [regex]::Match($output, "claude-auto\s+(\S+)")
+                if ($match.Success) {
+                    $version = $match.Groups[1].Value
+                    Write-Log "Pre-existing claude-auto detected via uv tool list (version: $version)"
+                    return @{ State = "Installed"; Version = $version }
+                }
             }
         } catch { }
         Write-Log "Pre-existing claude-auto detected in our uv tool dir (version unknown)"
@@ -200,7 +205,6 @@ function Detect-ClaudeAuto {
     Write-Log "claude-auto not detected in our uv tool environment"
     return @{ State = "NotInstalled"; Version = $null }
 }
-
 function Ensure-Uv {
     $ProgressPreference = 'SilentlyContinue'
     if (Get-Command "uv" -ErrorAction SilentlyContinue) {
