@@ -9,7 +9,6 @@ using System.Drawing;
 using System.Threading;
 using System.Linq;
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
 using System.Globalization;
 using System.Text;
 
@@ -69,10 +68,6 @@ public static class Loc {
 
         // Tray tooltip
         Strings["tray_text"] = new StringPair("claude-auto 2.1.0", "claude-auto 2.1.0");
-
-        // Console form
-        Strings["console_title"] = new StringPair("Claude Auto — Консоль", "Claude Auto — Console");
-        Strings["console_done_marker"] = new StringPair("✻ (Churned|Baked|Sautéed) for .* done", "✻ (Churned|Baked|Sautéed) for .* done");
     }
 
     public static string T(string key) {
@@ -116,9 +111,6 @@ public class TrayLauncher : ApplicationContext {
     private const int SW_HIDE = 0;
     private const int SW_RESTORE = 9;
     private const int SW_SHOW = 5;
-
-    // Regex to detect completion markers in Claude output
-    private static readonly Regex DoneRegex = new Regex(@"✻\s+(Churned|Baked|Sautéed)\s+for\s+.*\s+done", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public TrayLauncher() {
         uiContext = SynchronizationContext.Current;
@@ -265,21 +257,23 @@ public class TrayLauncher : ApplicationContext {
 
     private void LaunchClaude(string workingDir) {
         try {
-            var consoleForm = new ConsoleForm(workingDir, OnClaudeOutputLine, OnClaudeProcessExited);
-            consoleForm.Show();
+            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/k claude-auto") {
+                UseShellExecute = true,
+                WorkingDirectory = workingDir
+            };
+            claudeProcess = Process.Start(psi);
+            if (claudeProcess != null) {
+                claudeProcess.EnableRaisingEvents = true;
+                claudeProcess.Exited += OnClaudeProcessExited;
+            }
         } catch (Exception ex) {
             MessageBox.Show(Loc.T("error_launch") + ex.Message, Loc.T("error_title"), MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
-    private void OnClaudeOutputLine(string line) {
-        if (DoneRegex.IsMatch(line)) {
-            PostToUI(delegate { PlayNotification(); });
-        }
-    }
-
-    private void OnClaudeProcessExited() {
+    private void OnClaudeProcessExited(object sender, EventArgs e) {
         claudeProcess = null;
+        PostToUI(delegate { PlayNotification(); });
     }
 
     private void StartClaudeProcedure() {
@@ -473,98 +467,6 @@ public class TrayLauncher : ApplicationContext {
     private void PostToUI(Action action) {
         if (uiContext != null) {
             uiContext.Post(delegate { action(); }, null);
-        } else {
-            action();
-        }
-    }
-}
-
-public class ConsoleForm : Form {
-    private RichTextBox outputBox;
-    private Process process;
-    private Action<string> onOutputLine;
-    private Action onExited;
-    private string workingDir;
-
-    public ConsoleForm(string workingDir, Action<string> onOutputLine, Action onExited) {
-        this.workingDir = workingDir;
-        this.onOutputLine = onOutputLine;
-        this.onExited = onExited;
-
-        this.Text = Loc.T("console_title");
-        this.Size = new Size(900, 600);
-        this.StartPosition = FormStartPosition.CenterScreen;
-        this.FormBorderStyle = FormBorderStyle.Sizable;
-        this.ShowInTaskbar = true;
-
-        outputBox = new RichTextBox {
-            Dock = DockStyle.Fill,
-            ReadOnly = true,
-            BackColor = Color.Black,
-            ForeColor = Color.LimeGreen,
-            Font = new Font("Consolas", 10),
-            WordWrap = true,
-            ScrollBars = RichTextBoxScrollBars.Vertical,
-            HideSelection = false
-        };
-        this.Controls.Add(outputBox);
-
-        this.FormClosing += delegate(object s, FormClosingEventArgs e) {
-            if (process != null && !process.HasExited) {
-                try { process.Kill(); } catch { }
-            }
-        };
-
-        StartProcess();
-    }
-
-    private void StartProcess() {
-        ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/k claude-auto") {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            WorkingDirectory = workingDir,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
-        };
-
-        process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        process.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) {
-            if (e.Data != null) {
-                AppendOutput(e.Data);
-                if (onOutputLine != null) onOutputLine(e.Data);
-            }
-        };
-        process.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) {
-            if (e.Data != null) {
-                AppendOutput("[ERR] " + e.Data);
-            }
-        };
-        process.Exited += delegate(object s, EventArgs e) {
-            InvokeIfRequired(delegate {
-                AppendOutput("\n[Process exited with code: " + process.ExitCode + "]");
-                if (onExited != null) onExited();
-            });
-        };
-
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-    }
-
-    private void AppendOutput(string text) {
-        if (this.InvokeRequired) {
-            this.BeginInvoke(new Action<string>(AppendOutput), text);
-            return;
-        }
-        outputBox.AppendText(text + "\n");
-        outputBox.ScrollToCaret();
-    }
-
-    private void InvokeIfRequired(Action action) {
-        if (this.InvokeRequired) {
-            this.BeginInvoke(action);
         } else {
             action();
         }
