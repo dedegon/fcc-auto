@@ -266,119 +266,6 @@ function Ensure-Uv {
     }
 }
 
-function Find-SystemPython {
-    <#
-    .SYNOPSIS
-        Finds a system Python 3.11+ that is NOT a uv-managed Python.
-    .DESCRIPTION
-        Searches for Python in known system locations, avoiding uv-managed
-        Python installations (which can cause os error 448 on Windows 11 24H2+).
-    .OUTPUTS
-        System.String - Path to python.exe, or $null if not found.
-    #>
-    # 1. Check CLAUDE_AUTO_PYTHON env var (explicit override)
-    if ($env:CLAUDE_AUTO_PYTHON -and (Test-Path -LiteralPath $env:CLAUDE_AUTO_PYTHON)) {
-        $candidate = $env:CLAUDE_AUTO_PYTHON
-        if (Test-PythonVersion -Path $candidate -MinVersion "3.11") {
-            Write-Log "Find-SystemPython: using CLAUDE_AUTO_PYTHON: $candidate"
-            return $candidate
-        }
-    }
-
-    # 2. uv python list --only-installed, filter out managed Python paths
-    try {
-        $uvPythonOutput = & "uv" python list --only-installed 2>$null
-        if ($LASTEXITCODE -eq 0 -and $uvPythonOutput) {
-            $lines = $uvPythonOutput -split "`r?`n" | Where-Object { $_ -match '^\s*cpython-' }
-            foreach ($line in $lines) {
-                # Format: "cpython-3.11.9-windows-x86_64-none  C:\Users\...\uv\python\cpython-3.11.9-windows-x86_64-none\python.exe"
-                $parts = $line -split '\s+'
-                if ($parts.Count -ge 2) {
-                    $path = $parts[-1].Trim()
-                    # Skip uv-managed Python (contains \AppData\Roaming\uv\python\ or \.local\share\uv\python\)
-                    if ($path -notmatch '\\AppData\\Roaming\\uv\\python\\' -and $path -notmatch '\\.local\\share\\uv\\python\\') {
-                        if (Test-PythonVersion -Path $path -MinVersion "3.11") {
-                            Write-Log "Find-SystemPython: found via uv python list (non-managed): $path"
-                            return $path
-                        }
-                    }
-                }
-            }
-        }
-    } catch { }
-
-    # 3. Known system Python paths
-    $knownPaths = @(
-        "$env:LOCALAPPDATA\Python\bin\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe",
-        "C:\Python3*\python.exe"
-    )
-
-    foreach ($pattern in $knownPaths) {
-        $matches = @()
-        if ($pattern -match '\*') {
-            $dir = Split-Path -Parent $pattern
-            $file = Split-Path -Leaf $pattern
-            if (Test-Path -LiteralPath $dir) {
-                $matches = Get-ChildItem -Path $dir -Filter $file -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-            }
-        } else {
-            if (Test-Path -LiteralPath $pattern) {
-                $matches = @($pattern)
-            }
-        }
-        foreach ($path in $matches) {
-            if (Test-PythonVersion -Path $path -MinVersion "3.11") {
-                Write-Log "Find-SystemPython: found at known path: $path"
-                return $path
-            }
-        }
-    }
-
-    # 4. Get-Command python (if in PATH)
-    try {
-        $pythonCmd = Get-Command "python" -ErrorAction SilentlyContinue
-        if ($pythonCmd -and $pythonCmd.Source -eq "Application") {
-            $path = $pythonCmd.Source
-            if (Test-PythonVersion -Path $path -MinVersion "3.11") {
-                Write-Log "Find-SystemPython: found via Get-Command: $path"
-                return $path
-            }
-        }
-    } catch { }
-
-    Write-Log "Find-SystemPython: no system Python 3.11+ found"
-    return $null
-}
-
-function Test-PythonVersion {
-    param(
-        [string]$Path,
-        [string]$MinVersion
-    )
-    try {
-        $output = & $Path --version 2>&1
-        if ($LASTEXITCODE -ne 0 -or -not $output) {
-            return $false
-        }
-        # Output format: "Python 3.14.2" or "Python 3.11.9"
-        if ($output -match 'Python\s+(\d+)\.(\d+)\.(\d+)') {
-            $major = [int]$matches[1]
-            $minor = [int]$matches[2]
-            $patch = [int]$matches[3]
-            $minParts = $MinVersion -split '\.'
-            $minMajor = [int]$minParts[0]
-            $minMinor = [int]$minParts[1]
-            if ($major -gt $minMajor -or ($major -eq $minMajor -and $minor -ge $minMinor)) {
-                return $true
-            }
-        }
-        return $false
-    } catch {
-        return $false
-    }
-}
-
 function Install-Fcc {
     param([string]$Version)
     Write-Log "Installing FCC version $Version via uv (tool dir: $UvToolDir)"
@@ -391,19 +278,11 @@ function Install-Fcc {
         Write-Log "Using Python from CLAUDE_AUTO_PYTHON: $pyPath"
     }
     else {
-        # b) Try uv python find 3.14.10 (FCC requires 3.14.10)
+        # b) Try uv python find 3.14.10
         $found = & "uv" python find 3.14.10 2>$null
         if ($LASTEXITCODE -eq 0 -and $found -and (Test-Path -LiteralPath $found.Trim())) {
             $pyPath = $found.Trim()
             Write-Log "Found existing Python 3.14.10 via uv python find: $pyPath"
-        }
-        else {
-            # c) Fallback: try Find-SystemPython (for consistency with claude-auto install)
-            $systemPython = Find-SystemPython
-            if ($systemPython) {
-                $pyPath = $systemPython
-                Write-Log "Using system Python (found via Find-SystemPython) for FCC: $pyPath"
-            }
         }
     }
 
@@ -413,20 +292,9 @@ function Install-Fcc {
         return $true
     }
 
-    # d) Install FCC using found Python
+    # c) Install FCC using found Python - SIMPLE v2.0.0 LOGIC
     try {
-        $uvArgs = @("tool", "install", "--python", $pyPath, "free-claude-code==$Version", "--no-managed-python")
-
-        # Offline wheels cache support
-        $wheelsDir = Join-Path $SourceDir "wheels"
-        if (Test-Path -LiteralPath $wheelsDir) {
-            $uvArgs += "--find-links"
-            $uvArgs += $wheelsDir
-            $uvArgs += "--no-index"
-            Write-Log "Using offline wheels cache for FCC: $wheelsDir"
-        }
-
-        $output = & "uv" $uvArgs 2>&1
+        $output = & "uv" tool install --python $pyPath "free-claude-code==$Version" 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "FCC installation failed: $output"
             return $false
@@ -543,30 +411,8 @@ function Restore-BackedUpFiles {
 function Install-ClaudeAuto {
     Write-Log "Installing claude-auto from $InstallDir via uv (tool dir: $UvToolDir)"
     try {
-        # Find system Python to avoid os error 448 on Windows 11 24H2+
-        $systemPython = Find-SystemPython
-        $uvArgs = @("tool", "install", "--from", $SourceDir, "--force", "claude-auto")
-
-        # Add --no-managed-python flag to avoid managed Python issues (uv 0.4.0+)
-        $uvArgs += "--no-managed-python"
-
-        if ($systemPython) {
-            $uvArgs = @("tool", "install", "--from", $SourceDir, "--python", $systemPython, "--force", "claude-auto", "--no-managed-python")
-            Write-Log "Using system Python for uv tool install: $systemPython"
-        } else {
-            Write-Log "[WARN] System Python 3.11+ not found, using --no-managed-python flag (may fail on Windows 11 24H2+ with os error 448)"
-        }
-
-        # Offline wheels cache support
-        $wheelsDir = Join-Path $SourceDir "wheels"
-        if (Test-Path -LiteralPath $wheelsDir) {
-            $uvArgs += "--find-links"
-            $uvArgs += $wheelsDir
-            $uvArgs += "--no-index"
-            Write-Log "Using offline wheels cache: $wheelsDir"
-        }
-
-        $output = & "uv" $uvArgs 2>&1
+        # SIMPLE v2.0.0 LOGIC: just uv tool install --force $InstallDir
+        $output = & "uv" tool install --force $InstallDir 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "claude-auto installation failed: $output"
             return $false
