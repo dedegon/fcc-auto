@@ -87,15 +87,19 @@ Source: "uv.sha256";  DestDir: "{app}"; Flags: ignoreversion
 Source: "claude-auto-install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "claude-auto-uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
+; C# Tray Launcher
+Source: "dist\tray_launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
+
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{localappdata}\{#MyAppName}\uv-tools\bin\claude-auto.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto"; IconFilename: "{app}\claude_auto.py"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; IconFilename: "{app}\tray_launcher.exe"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; WorkingDir: "{app}"; Comment: "Uninstall claude-auto"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{localappdata}\{#MyAppName}\uv-tools\bin\claude-auto.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto"; Tasks: desktopicon; IconFilename: "{app}\claude_auto.py"
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; Tasks: desktopicon; IconFilename: "{app}\tray_launcher.exe"
 
 [Run]
 ; Run the PowerShell installer after file copy
 ; Parameters are built by GetInstallParams (see [Code]) and passed via {code:GetInstallParams}
 Filename: "powershell.exe"; Parameters: "{code:GetInstallParams}"; StatusMsg: "Installing claude-auto and dependencies..."; Flags: runhidden waituntilterminated shellexec
+Filename: "{app}\tray_launcher.exe"; Description: "Запустить claude-auto в трее"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Run the PowerShell uninstaller before file removal
