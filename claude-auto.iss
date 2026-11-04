@@ -96,7 +96,7 @@ Source: "dist\wheels\*"; DestDir: "{app}\wheels"; Flags: ignoreversion recursesu
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; IconFilename: "{app}\tray_launcher.exe"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; WorkingDir: "{app}"; Comment: "Uninstall claude-auto"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; Tasks: desktopicon; IconFilename: "{app}\tray_launcher.exe"
+Name: "{code:GetRealDesktopPath}\{#MyAppName}"; Filename: "{app}\tray_launcher.exe"; WorkingDir: "{app}"; Comment: "Run claude-auto tray launcher"; Tasks: desktopicon; IconFilename: "{app}\tray_launcher.exe"
 
 [Run]
 ; Run the PowerShell installer after file copy
@@ -108,6 +108,11 @@ Filename: "{app}\tray_launcher.exe"; Description: "Запустить claude-aut
 ; Run the PowerShell uninstaller before file removal
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\claude-auto-uninstall.ps1"" -ManifestPath ""{localappdata}\{#MyAppName}\install.json"" -Force"; Flags: runhidden waituntilterminated shellexec
 
+[InstallDelete]
+; Remove old broken desktop shortcuts that might have been created with {autodesktop}
+Type: files; Name: "{autodesktop}\{#MyAppName}.lnk"
+Type: files; Name: "{commondesktop}\{#MyAppName}.lnk"
+
 [Code]
 var
   FCCDetected: Boolean;
@@ -117,6 +122,15 @@ var
   ClaudeAutoVersionStr: String;
   IsUpgradeFromOurInstall: Boolean;
   FCCWasInstalledByUs: Boolean;
+
+function GetRealDesktopPath(Param: String): String;
+var
+  RegKey: String;
+begin
+  RegKey := '';
+  RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders', 'Desktop', RegKey);
+  Result := ExpandConstant(RegKey);
+end;
 
 function GetFCCVersionFromExe(ExePath: String): String; forward;
 function CheckFCCViaUvToolList(var Version: String): Boolean; forward;

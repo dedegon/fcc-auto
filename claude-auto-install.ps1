@@ -612,16 +612,6 @@ function Verify-Installation {
         }
         Write-Log "claude-auto --help OK"
 
-        if ($script:fccPreexisting -or $script:fccInstalledByUs) {
-            $output = & "fcc-server.exe" --version 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Log "fcc-server --version check failed (non-fatal): $output" "WARN"
-            }
-            else {
-                Write-Log "fcc-server --version OK: $output"
-            }
-        }
-
         return $true
     }
     catch {
