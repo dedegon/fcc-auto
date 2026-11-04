@@ -6,22 +6,26 @@ using System.IO;
 using System.Web.Script.Serialization;
 using System.Drawing;
 using System.Threading;
+using System.Linq;
 
 public class TrayConfig {
     public TrayConfig() {
         mode = "beep";
-        path = "";
+        soundPath = "";
+        projectPath = "";
     }
     public string mode { get; set; }
-    public string path { get; set; }
+    public string soundPath { get; set; }
+    public string projectPath { get; set; }
 }
 
 public class TrayLauncher : ApplicationContext {
     private NotifyIcon trayIcon;
     private TrayConfig config;
     private string configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "claude-auto", "tray_config.json");
-    private Process fccServerProcess = null;
+    private Process fccProcess = null;
     private Process claudeProcess = null;
+    private ToolStripMenuItem showHideLogItem;
 
     [DllImport("winmm.dll")]
     private static extern long mciSendString(string strCommand, System.Text.StringBuilder strReturn, int iReturnLength, IntPtr hwndCallback);
@@ -34,6 +38,12 @@ public class TrayLauncher : ApplicationContext {
 
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
 
     private const int SW_HIDE = 0;
     private const int SW_RESTORE = 9;
@@ -48,88 +58,140 @@ public class TrayLauncher : ApplicationContext {
             Text = "claude-auto 2.1.0"
         };
 
+        BuildContextMenu();
+
+        trayIcon.DoubleClick += (s, e) => { if (fccProcess != null && !fccProcess.HasExited) ToggleFccLog(s, e); };
+
+        AddToStartup();
+        StartFccServer();
+    }
+
+    private void BuildContextMenu() {
         ContextMenuStrip menu = new ContextMenuStrip();
 
-        ToolStripMenuItem startShowClaude = new ToolStripMenuItem("🚀 Запустить/Показать Claude");
-        startShowClaude.Click += StartOrShowClaude;
-        menu.Items.Add(startShowClaude);
+        // 🚀 Запустить Claude [ИмяПапки] / Выбрать папку
+        string startLabel = string.IsNullOrEmpty(config.projectPath)
+            ? "🚀 Запустить Claude — Выбрать папку"
+            : "🚀 Запустить Claude [" + new DirectoryInfo(config.projectPath).Name + "]";
+        ToolStripMenuItem startClaude = new ToolStripMenuItem(startLabel);
+        startClaude.Click += StartClaude;
+        menu.Items.Add(startClaude);
 
-        ToolStripMenuItem hideClaude = new ToolStripMenuItem("🙈 Скрыть окно Claude");
+        // 👁 Скрыть окно Claude
+        ToolStripMenuItem hideClaude = new ToolStripMenuItem("👁 Скрыть окно Claude");
         hideClaude.Click += HideClaude;
         menu.Items.Add(hideClaude);
 
+        // 📁 Выбрать папку проекта...
+        ToolStripMenuItem selectFolder = new ToolStripMenuItem("📁 Выбрать папку проекта...");
+        selectFolder.Click += SelectProjectFolder;
+        menu.Items.Add(selectFolder);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        // 🌐 Открыть панель FCC
         ToolStripMenuItem openFcc = new ToolStripMenuItem("🌐 Открыть панель FCC");
         openFcc.Click += OpenFcc;
         menu.Items.Add(openFcc);
 
-        ToolStripMenuItem settings = new ToolStripMenuItem("⚙️ Настройки оповещений");
-        settings.Click += ShowSettings;
-        menu.Items.Add(settings);
+        // 📜 Показать/Скрыть лог FCC
+        showHideLogItem = new ToolStripMenuItem("📜 Показать лог FCC");
+        showHideLogItem.Click += ToggleFccLog;
+        menu.Items.Add(showHideLogItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
+        // ⚙️ Настройки звука >
+        ToolStripMenuItem soundMenu = new ToolStripMenuItem("⚙️ Настройки звука");
+
+        ToolStripMenuItem beepItem = new ToolStripMenuItem("🔔 Встроенный писк");
+        beepItem.Click += (s, e) => { config.mode = "beep"; config.soundPath = ""; SaveConfig(); UpdateSoundMenuChecks(soundMenu); };
+        soundMenu.DropDownItems.Add(beepItem);
+
+        ToolStripMenuItem customItem = new ToolStripMenuItem("🎵 Выбрать свой звук...");
+        customItem.Click += SelectCustomSound;
+        soundMenu.DropDownItems.Add(customItem);
+
+        ToolStripMenuItem noneItem = new ToolStripMenuItem("🔇 Без звука");
+        noneItem.Click += (s, e) => { config.mode = "none"; SaveConfig(); UpdateSoundMenuChecks(soundMenu); };
+        soundMenu.DropDownItems.Add(noneItem);
+
+        menu.Items.Add(soundMenu);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        // ❌ Выход
         ToolStripMenuItem exit = new ToolStripMenuItem("❌ Выход");
         exit.Click += ExitApp;
         menu.Items.Add(exit);
 
         trayIcon.ContextMenuStrip = menu;
-        trayIcon.DoubleClick += OpenFcc;
+        UpdateSoundMenuChecks(soundMenu);
+    }
 
-        AddToStartup();
-        StartFccServer();
-        StartClaudeConsole();
+    private void UpdateSoundMenuChecks(ToolStripMenuItem soundMenu) {
+        foreach (ToolStripItem item in soundMenu.DropDownItems) {
+            ToolStripMenuItem mi = item as ToolStripMenuItem;
+            if (mi != null) {
+                if (mi.Text.Contains("Встроенный") && config.mode == "beep") mi.Checked = true;
+                else if (mi.Text.Contains("свой звук") && config.mode == "custom") mi.Checked = true;
+                else if (mi.Text.Contains("Без звука") && config.mode == "none") mi.Checked = true;
+                else mi.Checked = false;
+            }
+        }
     }
 
     private void StartFccServer() {
         try {
             ProcessStartInfo psi = new ProcessStartInfo("fcc-server") {
                 UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
+                CreateNoWindow = false,
+                WindowStyle = ProcessWindowStyle.Normal
             };
-            fccServerProcess = Process.Start(psi);
+            fccProcess = Process.Start(psi);
+            if (fccProcess != null) {
+                Thread.Sleep(1000);
+                if (fccProcess.MainWindowHandle != IntPtr.Zero) {
+                    ShowWindow(fccProcess.MainWindowHandle, SW_HIDE);
+                }
+            }
         } catch {
             // fcc-server might not be in PATH, ignore silently
         }
     }
 
-    private void StartClaudeConsole() {
-        try {
-            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/k claude-auto") {
-                UseShellExecute = true
-            };
-            claudeProcess = Process.Start(psi);
-            if (claudeProcess != null) {
-                claudeProcess.EnableRaisingEvents = true;
-                claudeProcess.Exited += (s, ev) => {
-                    claudeProcess = null;
-                    PlayNotification();
-                };
+    private void StartClaude(object sender, EventArgs e) {
+        if (string.IsNullOrEmpty(config.projectPath)) {
+            SelectProjectFolder(sender, e);
+            return;
+        }
+        LaunchClaude();
+    }
+
+    private void SelectProjectFolder(object sender, EventArgs e) {
+        using (FolderBrowserDialog fbd = new FolderBrowserDialog()) {
+            fbd.Description = "Выберите папку проекта для claude-auto";
+            fbd.ShowNewFolderButton = true;
+            if (fbd.ShowDialog() == DialogResult.OK) {
+                config.projectPath = fbd.SelectedPath;
+                SaveConfig();
+                // Update the start menu item text
+                if (trayIcon.ContextMenuStrip != null && trayIcon.ContextMenuStrip.Items.Count > 0) {
+                    var startItem = trayIcon.ContextMenuStrip.Items[0] as ToolStripMenuItem;
+                    if (startItem != null) {
+                        startItem.Text = "🚀 Запустить Claude [" + new DirectoryInfo(config.projectPath).Name + "]";
+                    }
+                }
+                LaunchClaude();
             }
-        } catch {
-            // Ignore startup errors
         }
     }
 
-    private void StartOrShowClaude(object sender, EventArgs e) {
-        if (claudeProcess != null && !claudeProcess.HasExited) {
-            // Process exists, try to restore its window
-            IntPtr hWnd = claudeProcess.MainWindowHandle;
-            if (hWnd != IntPtr.Zero) {
-                if (IsIconic(hWnd)) {
-                    ShowWindow(hWnd, SW_RESTORE);
-                } else {
-                    ShowWindow(hWnd, SW_RESTORE);
-                }
-                SetForegroundWindow(hWnd);
-            }
-            return;
-        }
-
-        // Process not running, start new one
+    private void LaunchClaude() {
         try {
             ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/k claude-auto") {
-                UseShellExecute = true
+                UseShellExecute = true,
+                WorkingDirectory = config.projectPath
             };
             claudeProcess = Process.Start(psi);
             if (claudeProcess != null) {
@@ -157,6 +219,40 @@ public class TrayLauncher : ApplicationContext {
         try { Process.Start("http://127.0.0.1:8082/admin"); } catch { }
     }
 
+    private void ToggleFccLog(object sender, EventArgs e) {
+        if (fccProcess == null || fccProcess.HasExited) {
+            MessageBox.Show("Процесс fcc-server не запущен", "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        IntPtr hWnd = fccProcess.MainWindowHandle;
+        if (hWnd == IntPtr.Zero) return;
+
+        RECT rect;
+        GetWindowRect(hWnd, out rect);
+        bool isVisible = (rect.Right - rect.Left > 0) && (rect.Bottom - rect.Top > 0);
+
+        if (isVisible) {
+            ShowWindow(hWnd, SW_HIDE);
+            showHideLogItem.Text = "📜 Показать лог FCC";
+        } else {
+            ShowWindow(hWnd, SW_RESTORE);
+            SetForegroundWindow(hWnd);
+            showHideLogItem.Text = "📜 Скрыть лог FCC";
+        }
+    }
+
+    private void SelectCustomSound(object sender, EventArgs e) {
+        using (OpenFileDialog ofd = new OpenFileDialog()) {
+            ofd.Filter = "Audio files|*.mp3;*.wav|All files|*.*";
+            if (ofd.ShowDialog() == DialogResult.OK) {
+                config.mode = "custom";
+                config.soundPath = ofd.FileName;
+                SaveConfig();
+                UpdateSoundMenuChecks(trayIcon.ContextMenuStrip.Items.OfType<ToolStripMenuItem>().FirstOrDefault(m => m.Text.Contains("Настройки звука")));
+            }
+        }
+    }
+
     private void PlayNotification() {
         if (config.mode == "none") return;
 
@@ -168,50 +264,10 @@ public class TrayLauncher : ApplicationContext {
                     Console.Beep(1783, 150);
                 } catch { System.Media.SystemSounds.Exclamation.Play(); }
             }).Start();
-        } else if (config.mode == "custom" && File.Exists(config.path)) {
+        } else if (config.mode == "custom" && File.Exists(config.soundPath)) {
             mciSendString("close myaudio", null, 0, IntPtr.Zero);
-            mciSendString("open \"" + config.path + "\" type mpegvideo alias myaudio", null, 0, IntPtr.Zero);
+            mciSendString("open \"" + config.soundPath + "\" type mpegvideo alias myaudio", null, 0, IntPtr.Zero);
             mciSendString("play myaudio", null, 0, IntPtr.Zero);
-        }
-    }
-
-    private void ShowSettings(object sender, EventArgs e) {
-        using (Form f = new Form()) {
-            f.Text = "Настройки оповещений";
-            f.Size = new Size(400, 250);
-            f.FormBorderStyle = FormBorderStyle.FixedDialog;
-            f.MaximizeBox = false;
-            f.MinimizeBox = false;
-            f.StartPosition = FormStartPosition.CenterScreen;
-
-            RadioButton rbNone = new RadioButton() { Text = "Без звука", Location = new Point(20, 20), Width = 300, Checked = (config.mode == "none") };
-            RadioButton rbBeep = new RadioButton() { Text = "Встроенный писк (2 раза)", Location = new Point(20, 50), Width = 300, Checked = (config.mode == "beep") };
-            RadioButton rbCustom = new RadioButton() { Text = "Свой файл (MP3/WAV):", Location = new Point(20, 80), Width = 150, Checked = (config.mode == "custom") };
-
-            TextBox txtPath = new TextBox() { Location = new Point(175, 80), Width = 120, Text = config.path };
-            Button btnBrowse = new Button() { Text = "...", Location = new Point(300, 78), Width = 60 };
-            btnBrowse.Click += (s, ev) => {
-                OpenFileDialog ofd = new OpenFileDialog() { Filter = "Audio files|*.mp3;*.wav|All files|*.*" };
-                if (ofd.ShowDialog() == DialogResult.OK) { txtPath.Text = ofd.FileName; rbCustom.Checked = true; }
-            };
-
-            Button btnSave = new Button() { Text = "Сохранить", Location = new Point(150, 150), Width = 100 };
-            btnSave.Click += (s, ev) => {
-                if (rbNone.Checked) config.mode = "none";
-                else if (rbBeep.Checked) config.mode = "beep";
-                else config.mode = "custom";
-                config.path = txtPath.Text;
-                SaveConfig();
-                f.Close();
-            };
-
-            f.Controls.Add(rbNone);
-            f.Controls.Add(rbBeep);
-            f.Controls.Add(rbCustom);
-            f.Controls.Add(txtPath);
-            f.Controls.Add(btnBrowse);
-            f.Controls.Add(btnSave);
-            f.ShowDialog();
         }
     }
 
@@ -220,6 +276,9 @@ public class TrayLauncher : ApplicationContext {
             if (File.Exists(configPath)) {
                 string json = File.ReadAllText(configPath);
                 config = new JavaScriptSerializer().Deserialize<TrayConfig>(json);
+                // Ensure projectPath exists for older configs
+                if (config.projectPath == null) config.projectPath = "";
+                if (config.soundPath == null) config.soundPath = "";
             } else { config = new TrayConfig(); }
         } catch { config = new TrayConfig(); }
     }
@@ -240,6 +299,14 @@ public class TrayLauncher : ApplicationContext {
     }
 
     private void ExitApp(object sender, EventArgs e) {
+        // Kill fcc-server process
+        if (fccProcess != null && !fccProcess.HasExited) {
+            try { fccProcess.Kill(); } catch { }
+        }
+        // Kill claude-auto process
+        if (claudeProcess != null && !claudeProcess.HasExited) {
+            try { claudeProcess.Kill(); } catch { }
+        }
         trayIcon.Visible = false;
         Application.Exit();
     }
