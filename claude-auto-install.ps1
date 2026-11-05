@@ -248,6 +248,27 @@ function Find-Python {
         }
     } catch { }
 
+    # 3) Common install locations: %LOCALAPPDATA%\Programs\Python\Python3*\python.exe и %LOCALAPPDATA%\Python\bin\python.exe
+    $candidates = @()
+    $programsRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
+    if (Test-Path -LiteralPath $programsRoot) {
+        $candidates += Get-ChildItem -Path $programsRoot -Directory -Filter "Python3*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "python.exe" }
+    }
+    $candidates += Join-Path $env:LOCALAPPDATA "Python\bin\python.exe"
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $verText = & $candidate --version 2>$null
+        if ($verText -match 'Python (\d+)\.(\d+)') {
+            $pyMajor = [int]$Matches[1]
+            $pyMinor = [int]$Matches[2]
+            if ($pyMajor -gt 3 -or ($pyMajor -eq 3 -and $pyMinor -ge 11)) {
+                Write-Log "Found Python $verText via common path: $candidate"
+                return $candidate
+            }
+        }
+    }
+
     Write-Log "Python 3.11+ not found"
     return $null
 }
