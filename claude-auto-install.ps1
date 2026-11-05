@@ -216,6 +216,42 @@ function Detect-ClaudeAuto {
     Write-Log "claude-auto not detected in our uv tool environment"
     return @{ State = "NotInstalled"; Version = $null }
 }
+function Find-Python {
+    # 1) Check CLAUDE_AUTO_PYTHON env var
+    if ($env:CLAUDE_AUTO_PYTHON -and (Test-Path -LiteralPath $env:CLAUDE_AUTO_PYTHON)) {
+        $pyPath = $env:CLAUDE_AUTO_PYTHON
+        $version = & $pyPath --version 2>$null
+        if ($version -and $version -match 'Python (\d+)\.(\d+)') {
+            $major = [int]$matches[1]
+            $minor = [int]$matches[2]
+            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
+                Write-Log "Found Python $version via CLAUDE_AUTO_PYTHON: $pyPath"
+                return $pyPath
+            }
+        }
+    }
+
+    # 2) Try Get-Command python (Source)
+    try {
+        $cmd = Get-Command "python" -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) {
+            $pyPath = $cmd.Source
+            $version = & $pyPath --version 2>$null
+            if ($version -and $version -match 'Python (\d+)\.(\d+)') {
+                $major = [int]$matches[1]
+                $minor = [int]$matches[2]
+                if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
+                    Write-Log "Found Python $version via Get-Command: $pyPath"
+                    return $pyPath
+                }
+            }
+        }
+    } catch { }
+
+    Write-Log "Python 3.11+ not found"
+    return $null
+}
+
 function Ensure-Uv {
     $ProgressPreference = 'SilentlyContinue'
     if (Get-Command "uv" -ErrorAction SilentlyContinue) {
@@ -397,9 +433,9 @@ function Restore-BackedUpFiles {
 }
 
 function Install-ClaudeAuto {
-    Write-Log "Installing claude-auto from $InstallDir via uv (tool dir: $UvToolDir)"
+    Write-Log "Installing claude-auto from $InstallDir via uv (tool dir: $UvToolDir) using Python: $script:pyPath"
     try {
-        $output = & "uv" tool install --force $InstallDir 2>&1
+        $output = & "uv" tool install --python $script:pyPath --force $InstallDir 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorLog "claude-auto installation failed: $output"
             return $false
@@ -540,12 +576,28 @@ function Add-UvBinToUserPath {
 # ========== MAIN ==========
 function Main {
     try {
+        # Step -1: Find Python 3.11+ BEFORE any logging or file operations
+        $script:pyPath = Find-Python
+        if (-not $script:pyPath) {
+            Write-ErrorLog "Python 3.11+ not found. Install Python 3.11+ from python.org and run setup again."
+            Write-Manifest -Status "failed" -ManifestPathOverride $ManifestPath -FccVersion $null
+            # Add error field to manifest
+            try {
+                $json = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8
+                $manifest = $json | ConvertFrom-Json
+                $manifest.error = "python_not_found"
+                $manifest | ConvertTo-Json -Depth 5 | Out-File -FilePath $ManifestPath -Encoding UTF8
+            } catch { }
+            exit 1
+        }
+
         Write-Log "=== claude-auto installation started ==="
         Write-Log "InstallDir: $InstallDir"
         Write-Log "DataDir: $DataDir"
         Write-Log "UvToolDir: $UvToolDir"
         Write-Log "InstallFcc: $InstallFcc"
         Write-Log "Silent: $Silent"
+        Write-Log "Using Python: $script:pyPath"
 
         # Step 0: Read existing manifest to detect upgrade from our previous install
         $existingManifest = $null
