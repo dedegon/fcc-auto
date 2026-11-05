@@ -580,14 +580,36 @@ function Main {
         $script:pyPath = Find-Python
         if (-not $script:pyPath) {
             Write-ErrorLog "Python 3.11+ not found. Install Python 3.11+ from python.org and run setup again."
-            Write-Manifest -Status "failed" -ManifestPathOverride $ManifestPath -FccVersion $null
-            # Add error field to manifest
-            try {
-                $json = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8
-                $manifest = $json | ConvertFrom-Json
-                $manifest.error = "python_not_found"
-                $manifest | ConvertTo-Json -Depth 5 | Out-File -FilePath $ManifestPath -Encoding UTF8
-            } catch { }
+            # Clean up files copied by Inno Setup
+            if (Test-Path -LiteralPath $InstallDir) {
+                try {
+                    Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction Stop
+                    Write-Log "Cleaned up InstallDir after Python check failure"
+                } catch {
+                    Write-ErrorLog "Failed to clean up InstallDir: $($_.Exception.Message)"
+                }
+            }
+            # Write manifest with error field directly
+            $version = Get-ProjectVersion -InstallDir $InstallDir
+            $manifest = @{
+                repo_path                      = $InstallDir
+                install_dir                    = $InstallDir
+                data_dir                       = $DataDir
+                uv_tool_dir                    = $UvToolDir
+                uv_tool_bin_dir                = $UvToolBinDir
+                status                         = "failed"
+                updated                        = (Get-Date).ToString("o")
+                fcc_preexisting                = $false
+                fcc_installed_by_us            = $false
+                fcc_upgrade_from_our_previous  = $false
+                claude_auto_preexisting        = $false
+                claude_auto_installed_by_us    = $false
+                claude_auto_upgrade_from_our_previous = $false
+                version                        = $version
+                error                          = "python_not_found"
+            }
+            $manifest | ConvertTo-Json -Depth 5 | Out-File -FilePath $ManifestPath -Encoding UTF8
+            Write-Log "Manifest written: failed (python_not_found)"
             exit 1
         }
 
