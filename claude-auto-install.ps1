@@ -84,7 +84,7 @@ function Get-ProjectVersion {
     $pyproject = Join-Path $InstallDir 'pyproject.toml'
     if (Test-Path -LiteralPath $pyproject) {
         $content = Get-Content -LiteralPath $pyproject -Raw
-        if ($content -match 'version\s*=\s*"([^"]+)"') { return $matches[1] }
+        if ($content -match 'version\s*=\s*"([^"]+)"') { $m = $Matches; return $m[1] }
     }
     return '0.0.0'
 }
@@ -115,7 +115,7 @@ function Write-Manifest {
             claude_auto_upgrade_from_our_previous = $script:claudeAutoUpgradeFromOurPrevious
             version                        = $version
         }
-        if (($script:fccInstalledByUs -or $script:fccPreexisting) -and $FccVersion) { $manifest.fcc_version = $FccVersion }
+        if ($script:fccInstalledByUs -and $FccVersion) { $manifest.fcc_version = $FccVersion }
         $json = $manifest | ConvertTo-Json -Depth 5
         $json | Out-File -FilePath $path -Encoding UTF8
         Write-Log "Manifest written: $Status"
@@ -222,8 +222,9 @@ function Find-Python {
         $pyPath = $env:CLAUDE_AUTO_PYTHON
         $version = & $pyPath --version 2>$null
         if ($version -and $version -match 'Python (\d+)\.(\d+)') {
-            $major = [int]$matches[1]
-            $minor = [int]$matches[2]
+            $m = $Matches
+            $major = [int]$m[1]
+            $minor = [int]$m[2]
             if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
                 Write-Log "Found Python $version via CLAUDE_AUTO_PYTHON: $pyPath"
                 return $pyPath
@@ -238,8 +239,9 @@ function Find-Python {
             $pyPath = $cmd.Source
             $version = & $pyPath --version 2>$null
             if ($version -and $version -match 'Python (\d+)\.(\d+)') {
-                $major = [int]$matches[1]
-                $minor = [int]$matches[2]
+                $m = $Matches
+                $major = [int]$m[1]
+                $minor = [int]$m[2]
                 if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
                     Write-Log "Found Python $version via Get-Command: $pyPath"
                     return $pyPath
