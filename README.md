@@ -19,7 +19,7 @@
 
 Из любой папки:
 
-    git clone https://github.com/dedegon/fcc-auto.git
+    git clone https://github.com/dedegon/fcc-auto.git](https://github.com/dedegon/fcc-auto/tree/legacy/1.0.0
     cd fcc-auto
     .\install.ps1
 
