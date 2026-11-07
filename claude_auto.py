@@ -14,6 +14,7 @@ import scanner_config as cfg
 from claude_filter import alias_for, start_filter
 from model_limits.registry import LimitsRegistry
 from scanner import CACHE_DIR, ModelScanner, fcc_provider_status, provider_keys
+from request_log import init_logger
 
 HELP = {
     "ru": {
@@ -29,6 +30,8 @@ HELP = {
             ("--offline, --offs", "не сканировать, взять проверенные из кэша"),
             ("--list", "показать проверенные модели из кэша и выйти"),
             ("--skip MODEL", "исключить модель, можно указать несколько раз"),
+            ("--request-log", "включить логирование запросов в reports/"),
+            ("--request-log-dir PATH", "папка для логов запросов (по умолчанию reports/)"),
             ("-h, --help", "показать эту справку"),
         ],
         "examples_title": "Примеры:",
@@ -58,6 +61,8 @@ HELP = {
             ("--offline, --offs", "skip scanning, use verified models from cache"),
             ("--list", "show verified models from the cache and exit"),
             ("--skip MODEL", "exclude a model, can be given several times"),
+            ("--request-log", "enable request logging to reports/"),
+            ("--request-log-dir PATH", "request log directory (default reports/)"),
             ("-h, --help", "show this help"),
         ],
         "examples_title": "Examples:",
@@ -242,9 +247,21 @@ def main() -> None:
     parser.add_argument("--max-wait", type=float, default=cfg.DEFAULT_MAX_WAIT_S)
     parser.add_argument("--workers", type=int, default=cfg.DEFAULT_WORKERS)
     parser.add_argument("--rescan", action="store_true", help="перепроверить все модели")
+    parser.add_argument("--request-log", action="store_true", help="включить логирование запросов в reports/")
+    parser.add_argument("--request-log-dir", type=str, help="папка для логов запросов (по умолчанию reports/)")
     args, claude_args = parser.parse_known_args()
     if claude_args and claude_args[0] == "--":
         claude_args = claude_args[1:]
+
+    # Initialize request logger if enabled
+    request_logger = None
+    request_log_enabled = args.request_log or cfg.REQUEST_LOG_ENABLED
+    if request_log_enabled:
+        log_dir = Path(args.request_log_dir or cfg.REQUEST_LOG_DIR).resolve()
+        request_logger = init_logger(log_dir)
+        lang_ru = lang == "ru"
+        msg = f"Логирование запросов: включено, папка: {log_dir}" if lang_ru else f"Request logging: enabled, dir: {log_dir}"
+        print(msg)
 
     scanner = ModelScanner()
     for fid in args.skip:
@@ -290,6 +307,7 @@ def main() -> None:
         lambda: set(scanner.usable()),
         limits,
         get_window=scanner.get_context_window,
+        request_logger=request_logger,
     )
     claude_bin = shutil.which("claude")
     if not claude_bin:

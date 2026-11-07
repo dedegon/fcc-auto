@@ -8,17 +8,19 @@ Claude Code показывает в /model только модели с ID, на
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from model_limits.registry import LimitsRegistry
+from request_log import RequestLogger
 import scanner_config as cfg
 
 SKIP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "content-length", "host", "upgrade"}
@@ -94,6 +96,7 @@ class _Handler(BaseHTTPRequestHandler):
     upstream: str = ""
     verified: Callable[[], set[str]] = staticmethod(lambda: set())
     get_window: Callable[[str], int | None] = staticmethod(lambda _: None)
+    request_logger: RequestLogger | None = None
 
     def log_message(self, *args) -> None:
         pass
@@ -206,8 +209,20 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         if body and urlsplit(self.path).path in INFERENCE_PATHS:
+            # Parse original request for logging
+            original_request = None
+            try:
+                original_request = json.loads(body)
+            except Exception:
+                pass
+
             # Check if we need to switch model due to rate limit
             switched = False
+            request_num = None
+            request_time = None
+            log_ref = None
+            log_provider = None
+
             for attempt in range(3):  # max 3 attempts: original + up to 2 switches
                 if switched:
                     # Re-read body for switched model
@@ -219,6 +234,14 @@ class _Handler(BaseHTTPRequestHandler):
                 if not ref:
                     self._send_upstream(body)
                     return
+
+                # Initialize request logging on first attempt
+                if request_num is None and self.request_logger is not None:
+                    request_num = self.request_logger.get_next_number()
+                    request_time = datetime.now(timezone.utc)
+                    log_ref = ref
+                    # Extract provider from ref (format: provider/model)
+                    log_provider = ref.split("/", 1)[0] if "/" in ref else "unknown"
 
                 # Send request
                 try:
@@ -234,9 +257,21 @@ class _Handler(BaseHTTPRequestHandler):
                             self.send_header(k, v)
                     self.end_headers()
                     read = getattr(resp, "read1", resp.read)
+                    response_chunks = []
                     while chunk := read(8192):
+                        response_chunks.append(chunk)
                         self.wfile.write(chunk)
                         self.wfile.flush()
+
+                    # Parse response for logging
+                    response_data = None
+                    error_msg = None
+                    if response_chunks:
+                        try:
+                            response_text = b"".join(response_chunks).decode("utf-8", errors="replace")
+                            response_data = json.loads(response_text)
+                        except Exception:
+                            response_data = {"raw": response_text[:500] if response_chunks else ""}
 
                     # Track limits
                     try:
@@ -247,6 +282,21 @@ class _Handler(BaseHTTPRequestHandler):
                             log(f"429 {ref}, cooldown {wait:.1f}s")
                     except Exception as err:
                         log(f"limits error {ref}: {type(err).__name__}: {err}")
+
+                    # Log request/response
+                    if self.request_logger is not None and request_num is not None:
+                        try:
+                            self.request_logger.write_request_log(
+                                request_num=request_num,
+                                timestamp_utc=request_time,
+                                model=log_ref,
+                                provider=log_provider,
+                                request_data=original_request or {},
+                                response_data=response_data,
+                                error=None if 200 <= status < 300 else f"HTTP {status}",
+                            )
+                        except Exception as e:
+                            print(f"Предупреждение: не удалось записать лог запроса: {e}", file=sys.stderr)
 
                     # Handle 429/413 - switch model
                     if status in (429, 413) and not switched:
@@ -329,9 +379,20 @@ class _Handler(BaseHTTPRequestHandler):
                         if k.lower() not in SKIP_HEADERS:
                             self.send_header(k, v)
                     self.end_headers()
+                    error_chunks = []
                     while chunk := err.read(8192):
+                        error_chunks.append(chunk)
                         self.wfile.write(chunk)
                         self.wfile.flush()
+
+                    # Parse error response for logging
+                    error_data = None
+                    if error_chunks:
+                        try:
+                            error_text = b"".join(error_chunks).decode("utf-8", errors="replace")
+                            error_data = json.loads(error_text)
+                        except Exception:
+                            error_data = {"raw": error_text[:500] if error_chunks else ""}
 
                     # Track limits
                     try:
@@ -340,6 +401,21 @@ class _Handler(BaseHTTPRequestHandler):
                             log(f"429 {ref}, cooldown {wait:.1f}s")
                     except Exception as e:
                         log(f"limits error {ref}: {type(e).__name__}: {e}")
+
+                    # Log request/error
+                    if self.request_logger is not None and request_num is not None:
+                        try:
+                            self.request_logger.write_request_log(
+                                request_num=request_num,
+                                timestamp_utc=request_time,
+                                model=log_ref,
+                                provider=log_provider,
+                                request_data=original_request or {},
+                                response_data=error_data,
+                                error=f"HTTP {status}",
+                            )
+                        except Exception as e:
+                            print(f"Предупреждение: не удалось записать лог запроса: {e}", file=sys.stderr)
 
                     # Handle 429/413 - switch model
                     if status in (429, 413) and not switched:
@@ -418,7 +494,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def start_filter(upstream: str, verified: Callable[[], set[str]], limits=None,
-                 get_window: Callable[[str], int | None] | None = None) -> ThreadingHTTPServer:
+                 get_window: Callable[[str], int | None] | None = None,
+                 request_logger: RequestLogger | None = None) -> ThreadingHTTPServer:
     """Фильтр на свободном порту 127.0.0.1 в фоновом потоке."""
     log(f"фильтр запущен, FCC: {upstream}")
     handler = type("FilterHandler", (_Handler,), {
@@ -426,6 +503,7 @@ def start_filter(upstream: str, verified: Callable[[], set[str]], limits=None,
         "verified": staticmethod(verified),
         "limits": limits or LimitsRegistry(),
         "get_window": staticmethod(get_window or (lambda _: None)),
+        "request_logger": request_logger,
     })
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()

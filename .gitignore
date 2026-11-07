@@ -11,3 +11,4 @@ claude-settings.json
 .env
 *.exe
 uv.lock
+reports/

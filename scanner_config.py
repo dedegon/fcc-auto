@@ -10,6 +10,10 @@ CACHE_VERSION = 4
 MIN_CONTEXT_TOKENS = 32000
 ALLOW_UNKNOWN_WINDOW = False
 
+# Request logging (opt-in only)
+REQUEST_LOG_ENABLED = False
+REQUEST_LOG_DIR = "reports"
+
 PROVIDERS = {
     "open_router": {
         "key_env": "OPENROUTER_API_KEY",
