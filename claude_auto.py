@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request  # <-- ДОБАВЛЕНО для проверки готовности API
 from pathlib import Path
 
 import scanner_config as cfg
@@ -75,7 +76,6 @@ HELP = {
     },
 }
 
-# Провайдеры, о которых сообщаем пользователю: (id FCC, название, переменная ключа, где взять ключ).
 PROVIDER_LINKS = [
     ("open_router", "OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
     ("groq", "Groq", "GROQ_API_KEY", "https://console.groq.com/keys"),
@@ -84,7 +84,6 @@ PROVIDER_LINKS = [
 
 
 def detect_lang() -> str:
-    """ru, если язык интерфейса Windows русский. CLAUDE_AUTO_LANG важнее всего."""
     forced = os.environ.get("CLAUDE_AUTO_LANG", "").strip().lower()
     if forced in ("ru", "en"):
         return forced
@@ -116,7 +115,6 @@ def print_help(lang: str) -> None:
 
 
 def print_report(lang: str, counts: dict[str, int], failed: list[str], keys: dict[str, str]) -> None:
-    """Отчёт о подключении: что готово, что нужно настроить и где взять ключ."""
     ru = lang == "ru"
     print("Провайдеры по данным FCC:" if ru else "Providers according to FCC:")
     known = {pid for pid, *_ in PROVIDER_LINKS}
@@ -142,7 +140,6 @@ def print_report(lang: str, counts: dict[str, int], failed: list[str], keys: dic
 
 
 def print_setup(lang: str) -> None:
-    """Ни один провайдер не готов: инструкция и выход, без ожидания ввода."""
     if lang == "ru":
         print()
         print("Нет ни одного готового провайдера, сканировать нечего.")
@@ -175,18 +172,49 @@ def ensure_server() -> bool:
         return False
     print("Запускаю fcc-server...")
     flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-    subprocess.Popen([exe], env={**os.environ, "PORT": str(cfg.PORT)},
+    
+    # ОЧИЩАЕМ ОКРУЖЕНИЕ ДЛЯ FCC-SERVER
+    clean_env = os.environ.copy()
+    for key in list(clean_env.keys()):
+        if any(x in key.upper() for x in ["API_KEY", "TOKEN", "OPENAI", "GROQ", "NVIDIA", "OPENROUTER", "ANTHROPIC"]):
+            del clean_env[key]
+    clean_env["PORT"] = str(cfg.PORT)
+    
+    subprocess.Popen([exe], env=clean_env,
                      creationflags=flags, cwd=str(CACHE_DIR.parent))
+    
     deadline = time.time() + 90
     while time.time() < deadline:
         if port_open():
-            return True
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{cfg.PORT}/admin/api/models")
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    if r.status == 200:
+                        # Ждем, пока количество моделей перестанет расти (сервер завершит фоновую загрузку)
+                        last_count = -1
+                        stable_checks = 0
+                        while time.time() < deadline:
+                            try:
+                                with urllib.request.urlopen(req, timeout=2) as r2:
+                                    data = json.loads(r2.read().decode("utf-8"))
+                                    current_count = len(data.get("models", []))
+                                    if current_count == last_count:
+                                        stable_checks += 1
+                                        if stable_checks >= 4: # 4 проверки подряд (2 секунды) без изменений
+                                            return True
+                                    else:
+                                        last_count = current_count
+                                        stable_checks = 0
+                            except Exception:
+                                pass
+                            time.sleep(0.5)
+            except Exception:
+                pass # API еще грузится
         time.sleep(0.5)
     return False
 
 
 def write_settings(models: list[str]) -> str:
-    """Список для /model: проверенные модели и стандартные псевдонимы. Обычный Claude не затрагивается."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / "claude-settings.json"
     data = {"availableModels": models + ["opus", "sonnet", "haiku"]}
@@ -195,7 +223,6 @@ def write_settings(models: list[str]) -> str:
 
 
 def saved_user_model() -> str | None:
-    """Модель, выбранная через /model (поле model в ~/.claude/settings.json)."""
     path = Path.home() / ".claude" / "settings.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -267,7 +294,10 @@ def main() -> None:
         srv.shutdown()
         sys.exit(1)
 
-    settings_path = write_settings([alias_for(m) for m in models])
+    # Генерируем правильные имена моделей
+    valid_aliases = [alias_for(m) for m in models]
+    settings_path = write_settings(valid_aliases)
+    
     env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
     env.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
     env.update({
@@ -284,8 +314,13 @@ def main() -> None:
         "DISABLE_FEEDBACK_COMMAND": "1",
         "DISABLE_ERROR_REPORTING": "1",
     })
-    # Если пользователь уже выбрал модель через /model, она важнее модели по умолчанию.
-    model_args = [] if saved_user_model() else ["--model", alias_for(models[0])]
+    
+    # ИСПРАВЛЕНИЕ КЛОДА: Если сохраненная модель не совпадает с новыми именами (старый формат), ставим первую доступную
+    saved = saved_user_model()
+    if saved in valid_aliases:
+        model_args = []
+    else:
+        model_args = ["--model", valid_aliases[0]]
 
     print(f"\nПроверенных моделей: {len(models)}")
     print("Полный список FCC: fcc-claude")
